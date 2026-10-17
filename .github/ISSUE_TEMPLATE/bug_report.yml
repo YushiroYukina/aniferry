@@ -1,0 +1,32 @@
+name: 问题反馈
+description: 报告界面、检索或下载器转交问题
+body:
+  - type: input
+    id: version
+    attributes:
+      label: 番舟版本与 Windows 版本
+      placeholder: AniFerry 1.10.0 / Windows 11 x64
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: 问题范围
+      options:
+        - 资源搜索与匹配
+        - 资料与封面缓存
+        - 下载器转交或完成识别
+        - 界面与批量操作
+        - 其他
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤、预期结果和实际结果
+      description: 下载器问题请注明类型和版本；不要填写密码、RPC密钥或私人路径。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 可选截图或经过脱敏的诊断片段
+      description: 不要上传完整数据库、任务记录或包含个人信息的原始日志。

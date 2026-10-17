@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="AniFerry">
+<rect x="8" y="8" width="240" height="240" rx="58" fill="#287f72"/>
+<path d="M126 47v104H59z" fill="#f9f5e8"/>
+<path d="M140 62l58 89h-58z" fill="#bfe2d7"/>
+<path d="M47 167h162l-29 34H80z" fill="#f9f5e8"/>
+<path d="M47 213q20-12 40 0t40 0t40 0t40 0" fill="none" stroke="#bfe2d7" stroke-width="10" stroke-linecap="round"/>
+<circle cx="204" cy="53" r="11" fill="#f0cf86"/>
+</svg>
