@@ -467,6 +467,9 @@ class Store:
         row=self.db.execute('SELECT aliases FROM shows WHERE id=?',(sid,)).fetchone()
         if not row: raise ValueError('该动画已删除，停止转交')
         if not matches_show(item,json.loads(row[0])): raise ValueError('资源片名与当前动画不符，停止转交')
+        # An existing handoff belongs to its original downloader, regardless of the current default.
+        if self.db.execute("SELECT 1 FROM releases WHERE show_id=? AND episode=? AND status IN ('待接收','已转交','已完成')", (sid, item['episode'])).fetchone():
+            raise ValueError('本集已有转交记录')
         from downloaders import client,encode_profile
         backend=backend or self.setting('downloader','bitcomet')
         profile=self.downloader_profile(backend)
@@ -477,9 +480,6 @@ class Store:
         output = Path(self.setting('output', DEFAULT_OUTPUT))
         if not output.is_absolute():
             raise ValueError('下载目录必须为绝对路径')
-        # All torrents in one episode are suppressed once one has been handed off.
-        if self.db.execute("SELECT 1 FROM releases WHERE show_id=? AND episode=? AND status IN ('待接收','已转交','已完成')", (sid, item['episode'])).fetchone():
-            raise ValueError('本集已有转交记录')
         first,last,_=self.episode_rule(sid)
         ep=episode_number(item['episode'])
         if ep is not None and (ep < first or last and ep > last):

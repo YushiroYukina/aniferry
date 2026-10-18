@@ -94,7 +94,9 @@ class ProtocolTests(unittest.TestCase):
                     self.assertTrue((output/'_种子'/(HASH+'.torrent')).is_file())
                     self.assertEqual(store.poll_downloaders()[:2],(0,0))
                     # Selecting a different default cannot change which application owns this handoff.
-                    store.set_setting('downloader','bitcomet'); state['visible']=True
+                    store.set_setting('downloader','bitcomet')
+                    store.set_setting('bitcomet',str(Path(tmp)/'not-installed.exe'))
+                    state['visible']=True
                     state['directory']=str(Path(tmp)/'wrong'); self.assertEqual(store.poll_downloaders()[:2],(0,0))
                     state['directory']=str(output); state['wronghash']=True
                     self.assertEqual(store.poll_downloaders()[:2],(0,0)); state['wronghash']=False
