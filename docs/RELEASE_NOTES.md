@@ -21,4 +21,4 @@
 
 55项本地回归测试、独立源码目录复测以及Windows打包与空配置启动检查通过。qBittorrent/aria2/Motrix目前主要通过本地HTTP模拟服务验证协议；BitComet、迅雷读取本机任务记录曾验证，四种新增下载方式尚无新任务完整下载验收。迅雷还需在新建任务窗口确认下载目录。只下部分文件不会自动认定整集完成。
 
-没有在GitHub目标仓库运行过Actions；发布前请查看首次流水线结果。程序未代码签名，压缩包附带源码/第三方许可说明与校验文件。
+[GitHub Actions](https://github.com/YushiroYukina/aniferry/actions/runs/39095487280)已通过云端测试、Windows打包和新配置启动检查。程序未代码签名，压缩包附带源码/第三方许可说明与校验文件。

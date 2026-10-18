@@ -16,12 +16,13 @@ python -m unittest -v test_core.py test_ui.py test_details.py test_downloaders.p
 
 2026-10-18本地Windows构建使用Python 3.12，开发目录与独立上传源码目录的55项测试均通过。生成的EXE空配置启动退出码为0、无待处理任务；空追番库不加载详情或封面属于预期。图形显示通过真实原生窗口截图检查。演示截图中的作品、封面、评分和资源均为虚构，不是来源覆盖或下载成功的证据。
 
+GitHub Actions [云端构建](https://github.com/YushiroYukina/aniferry/actions/runs/39095487280)已通过55项测试、Windows打包及新配置启动检查；这不代表真实下载器的完整下载流程已验收。
+
 ## 当前未完成的验收
 
 - qBittorrent、aria2、Motrix尚未完成新任务从提交到整项下载完成的实机验收。
 - 迅雷任务库读取曾在一个本机版本验证，其他版本结构兼容性需要实机确认；新建任务仍需用户确认目录。
 - BitComet任务XML读取曾验证，但不把历史记录读取当作新任务完整下载成功。
-- GitHub Actions仅准备配置，尚未在目标仓库运行。
 - 未验证Windows以外系统、Linux/NAS路径映射、多用户共享数据或全天候后台服务。
 - 程序未代码签名；构建和压缩包检查不等于所有Windows环境兼容。
 

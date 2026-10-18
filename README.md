@@ -4,6 +4,8 @@
 
 **把新番更新送到下载器，让追番与整理更顺手。**
 
+[![Windows build](https://github.com/YushiroYukina/aniferry/actions/workflows/windows-build.yml/badge.svg)](https://github.com/YushiroYukina/aniferry/actions/workflows/windows-build.yml)
+
 番舟是一款 Windows 本地追番桌面工具：追踪动画更新、从多个来源整理 BT 候选、查看 Bangumi 资料，并在人工确认后把种子交给下载器。原名“追番信箱”，当前版本 **1.10.0**。
 
 ## 主要功能
@@ -64,7 +66,7 @@ python -m venv .venv
 - qBittorrent、aria2和Motrix主要通过本地HTTP模拟服务验证协议；BitComet、迅雷的本机任务记录读取曾验证。新接入下载器尚无新任务完整下载验收，不把“启动成功”或“接口模拟通过”当作真实下载成功。
 - 搜索来源有近期结果数量、网络访问和命名差异限制；误匹配过滤不能替代人工核对。
 - 字幕标记根据资源标题判断，没有检查实际媒体字幕轨道。只下载种子内部分文件不会自动认定整集完成。
-- Windows发行包尚未代码签名；GitHub Actions已准备，但未在目标仓库实际运行。
+- Windows发行包尚未代码签名；[GitHub Actions](https://github.com/YushiroYukina/aniferry/actions/runs/39095487280)已通过云端测试、Windows打包和启动检查。
 
 ## 数据与升级
 
