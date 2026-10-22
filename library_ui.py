@@ -250,4 +250,3 @@ class LibraryTools:
             text.pack(side='left',fill='both',expand=True);scroll=ttk.Scrollbar(frame,command=text.yview);scroll.pack(side='right',fill='y');text.configure(yscrollcommand=scroll.set)
             text.insert('1.0',value);text.configure(state='disabled')
             if label==selected:book.select(frame)
-
