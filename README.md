@@ -4,9 +4,15 @@
 
 **把新番更新送到下载器，让追番与整理更顺手。**
 
+**2.0 主版本** · Windows x64
+
+[下载番舟 2.0.0](https://github.com/YushiroYukina/aniferry/releases/download/v2.0.0/AniFerry-2.0.0-Windows-x64.zip) · [2.0 更新说明](https://github.com/YushiroYukina/aniferry/releases/tag/v2.0.0)
+
+旧版保留在[历史发布](https://github.com/YushiroYukina/aniferry/releases)，用于回退；推荐使用上方2.0下载入口。
+
 [![Windows build](https://github.com/YushiroYukina/aniferry/actions/workflows/windows-build.yml/badge.svg)](https://github.com/YushiroYukina/aniferry/actions/workflows/windows-build.yml)
 
-番舟是一款 Windows 本地追番桌面工具：追踪动画更新、从多个来源整理 BT 候选、查看 Bangumi 资料，并在人工确认后把种子交给下载器。原名“追番信箱”，当前版本 **1.11.1**；GitHub发行情况以Releases页面为准。
+番舟是一款 Windows 本地追番桌面工具：追踪动画更新、从多个来源整理 BT 候选、查看 Bangumi 资料，并在人工确认后把种子交给下载器。原名“追番信箱”，当前版本 **2.0.0**；GitHub发行情况以Releases页面为准。
 
 ## 主要功能
 
@@ -42,7 +48,7 @@
 
 ### 普通用户
 
-到本仓库 [Releases](https://github.com/YushiroYukina/aniferry/releases) 下载 `AniFerry-1.11.1-Windows-x64.zip`，解压整个目录后双击 `AniFerry-1.11.1.exe`。无需另装Python，须保留同目录 `_internal/`。
+通过[2.0 默认下载页](https://github.com/YushiroYukina/aniferry/releases/latest)下载 `AniFerry-2.0.0-Windows-x64.zip`，解压整个目录后双击 `AniFerry-2.0.0.exe`。无需另装Python，须保留同目录 `_internal/`。
 
 1. 打开“设置”，选择自己的下载目录，配置下载器并测试连接。为兼容旧版，未设置时默认仍为 `E:\动画\202610\追番`；新用户应按实际盘符修改。
 2. 点击“添加追番”，查找并选用正确的Bangumi作品与季度，可连续添加多部。
@@ -69,7 +75,7 @@ python -m venv .venv
 - qBittorrent、aria2和Motrix主要通过本地HTTP模拟服务验证协议；BitComet、迅雷的本机任务记录读取曾验证。新接入下载器尚无新任务完整下载验收，不把“启动成功”或“接口模拟通过”当作真实下载成功。
 - 搜索来源有近期结果数量、网络访问和命名差异限制；误匹配过滤不能替代人工核对。
 - 字幕标记根据资源标题判断，没有检查实际媒体字幕轨道。只下载种子内部分文件不会自动认定整集完成。
-- Windows发行包尚未代码签名；此前1.10.0的[GitHub Actions](https://github.com/YushiroYukina/aniferry/actions/runs/39095487280)已通过云端构建；1.11.1的验证情况见验证说明。
+- Windows发行包尚未代码签名；此前1.10.0的[GitHub Actions](https://github.com/YushiroYukina/aniferry/actions/runs/39095487280)已通过云端构建；2.0.0的验证情况见验证说明。
 
 ## 数据与升级
 
