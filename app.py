@@ -4,11 +4,13 @@ import queue
 import threading
 import time
 import tkinter as tk
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from tkinter import ttk, messagebox, filedialog
 from pathlib import Path
 from core import Store, DEFAULT_OUTPUT, discover_bitcomet, search_show, lookup, complete_aliases, fill_missing_aliases, completed_hashes, discover_task_file, normalized_title, task_records, same_directory
-from core import resolve_subject
+from core import resolve_subject, continuation_eligible
+from tracking import EpisodeView, SearchLimiter, save_source_health
+from library_ui import LibraryTools
 from details import DetailCache
 from appearance import apply_style, THEMES, SoftCard, SoftButton, recolor_native, mix, release_images
 from downloaders import LABELS,DEFAULTS,encode_profile,client,discover_thunder,thunder_db
@@ -37,6 +39,8 @@ class App:
         self.next_detail_batch=time.monotonic()+1
         self.detail_failures={}
         self.detail_checked={}
+        self.library_tools=LibraryTools(self)
+        self.search_limiter=SearchLimiter()
         self.compact=False
         self.build_ui(root)
         self.refresh_shows()
@@ -56,9 +60,9 @@ class App:
         self.theme_choice=tk.StringVar(value=self.palette['name'])
         theme_picker=ttk.Combobox(tools,textvariable=self.theme_choice,values=[p['name'] for p in THEMES.values()],state='readonly',width=5)
         theme_picker.pack(side='left',padx=(0,8)); theme_picker.bind('<<ComboboxSelected>>',lambda _:self.change_theme())
-        for label,command in [('待字幕清单',self.export),('下载目录',self.open_output),('设置',self.settings)]:
-            SoftButton(tools,text=label,command=command).pack(side='left',padx=4)
-        SoftButton(tools,text='检查更新',command=self.scan,style='Accent.TButton').pack(side='left',padx=(10,0))
+        SoftButton(tools,text='工具',command=lambda:self.show_tools_menu()).pack(side='left',padx=4)
+        SoftButton(tools,text='设置',command=self.settings).pack(side='left',padx=4)
+        SoftButton(tools,text='检查所选',command=self.scan_selected,style='Accent.TButton').pack(side='left',padx=(10,0))
         pane=ttk.Panedwindow(root,orient='horizontal'); pane.pack(fill='both',expand=True,padx=24)
         left=SoftCard(pane,self.palette,padding=22); right=ttk.Frame(pane)
         pane.add(left,weight=0); pane.add(right,weight=1)
@@ -78,7 +82,7 @@ class App:
         actions.columnconfigure((0,1),weight=1)
         self.welcome=SoftCard(right,self.palette,padding=24); self.welcome.pack(fill='x',pady=(0,14))
         ttk.Label(self.welcome,text='今天，想追哪一部？',style='Section.TLabel').pack(anchor='w')
-        ttk.Label(self.welcome,text='首次与每日首次启动补充刷新资料；点击动画即可查看介绍与待下载资源。',style='CardMuted.TLabel').pack(anchor='w',pady=(8,0))
+        ttk.Label(self.welcome,text='选择动画，查看介绍与更新。',style='CardMuted.TLabel').pack(anchor='w',pady=(8,0))
         self.intro=SoftCard(right,self.palette,padding=22)
         self.cover_label=tk.Label(self.intro,text='ANIME\n\n封面加载中',bg=self.palette['soft'],fg=self.palette['muted'],width=17,height=12,font=('Microsoft YaHei UI',10))
         self.cover_label._cover=True
@@ -114,23 +118,17 @@ class App:
         selector.pack(side='right',padx=12)
         selector.bind('<<ComboboxSelected>>',lambda _:self.choose_downloader())
         ttk.Label(resource_heading,text='下载器',style='CardMuted.TLabel').pack(side='right')
-        filters=ttk.Frame(self.resource_section); filters.pack(fill='x',pady=(0,8))
         self.first_ep=tk.StringVar(value='1'); self.last_ep=tk.StringVar()
-        for label,var in [('起始集',self.first_ep),('结束集（空=不限）',self.last_ep)]:
-            ttk.Label(filters,text=label).pack(side='left',padx=4)
-            ttk.Entry(filters,textvariable=var,width=5).pack(side='left')
-        SoftButton(filters,text='应用范围',command=self.apply_range).pack(side='left',padx=6)
-        SoftButton(filters,text='清除范围',command=lambda:self.apply_range(True)).pack(side='left')
         self.show_unknown=tk.BooleanVar(value=True)
-        ttk.Checkbutton(filters,text='显示待核对',variable=self.show_unknown,command=self.refresh_candidates).pack(side='left',padx=6)
         self.progress_label=tk.StringVar()
         table=ttk.Frame(self.resource_section,style='Card.TFrame'); table.pack(fill='both',expand=True)
         columns = ('ep', 'ani', 'sub', 'seeds', 'size', 'title')
         batch=ttk.Frame(self.resource_section,style='Card.TFrame'); batch.pack(fill='x',pady=(0,6))
         ttk.Label(batch,textvariable=self.progress_label,style='CardMuted.TLabel').pack(side='left')
-        SoftButton(batch,text='清除待核对',command=self.clear_unknown).pack(side='right')
+        SoftButton(batch,text='追踪设置',command=self.library_tools.preferences).pack(side='right')
         self.tree = ttk.Treeview(table, columns=columns, show='headings', selectmode='extended')
         self.tree.bind('<Control-a>',lambda _:self.select_all_candidates())
+        self.tree.bind('<Double-1>',lambda _:self.library_tools.candidates())
         for col, title, width in zip(columns, ['集数', '来源', '中文字幕', '做种', '大小', '资源标题'], [55,82,112,55,75,400]):
             anchor='w' if col=='title' else 'center'
             self.tree.heading(col, text=title,anchor=anchor); self.tree.column(col, width=width, stretch=col=='title',anchor=anchor)
@@ -144,15 +142,13 @@ class App:
         self.transfer_label=tk.StringVar(value='转交 '+self.downloader.get())
         SoftButton(bar, textvariable=self.transfer_label, command=self.transfer,style='Accent.TButton').pack(side='left')
         SoftButton(bar, text='忽略所选', command=self.ignore).pack(side='left', padx=8)
-        SoftButton(bar, text='打开资源页面', command=self.open_page).pack(side='left')
-        SoftButton(bar, text='转交历史', command=self.history).pack(side='left', padx=8)
-        SoftButton(bar, text='搜索诊断', command=self.search_diagnostics).pack(side='left')
+        SoftButton(bar, text='全部候选', command=self.library_tools.candidates).pack(side='left')
         table.pack_forget(); table.pack(fill='both',expand=True)
-        self.status = tk.StringVar(value='准备就绪。关闭窗口后停止定时检查。')
+        self.status = tk.StringVar(value='准备就绪')
         status_area=ttk.Frame(root); status_area.pack(side='bottom',fill='x')
         status_label=ttk.Label(status_area, textvariable=self.status, padding=(24,8),style='Muted.TLabel',wraplength=1200); status_label.pack(fill='x')
         status_area.bind('<Configure>',lambda e:status_label.configure(wraplength=max(400,e.width-48)))
-        self.log = tk.Text(status_area, height=1, state='disabled', wrap='word',bg=self.palette['bg'],fg=self.palette['muted'],highlightthickness=0,borderwidth=0,font=('Microsoft YaHei UI',9)); self.log._muted=True; self.log.pack(fill='x', padx=24, pady=(0,10))
+        self.log = tk.Text(status_area, height=1, state='disabled', wrap='word',bg=self.palette['bg'],fg=self.palette['muted'],highlightthickness=0,borderwidth=0,font=('Microsoft YaHei UI',9)); self.log._muted=True
         pane.pack_forget(); pane.pack(fill='both',expand=True,padx=24)
         root.bind('<Configure>',self.resize_layout,add='+')
 
@@ -160,6 +156,23 @@ class App:
         sel = self.shows.curselection()
         active=self.shows.index('active')
         return self.show_rows[active if active in sel else sel[0]] if sel else None
+
+    def show_tools_menu(self):
+        menu=getattr(self,'tools_menu',None)
+        if menu is None:
+            menu=tk.Menu(self.root,tearoff=False);self.tools_menu=menu
+            for label,command in [('检查全部',self.scan),('来源状态',self.library_tools.health),('转交历史',self.history),
+                                  ('清除当前待核对',self.clear_unknown),('待字幕清单',self.export),('下载目录',self.open_output),('使用说明',self.library_tools.help)]:
+                menu.add_command(label=label,command=command)
+        menu.configure(background=self.palette['card'],foreground=self.palette['ink'],activebackground=self.palette['soft'],activeforeground=self.palette['ink'])
+        try:menu.tk_popup(self.root.winfo_pointerx(),self.root.winfo_pointery())
+        finally:menu.grab_release()
+
+    def episode_view(self,sid):
+        row=self.store.db.execute('SELECT name,aliases FROM shows WHERE id=?',(sid,)).fetchone()
+        if not row:return EpisodeView()
+        options=self.store.show_options(sid)
+        return EpisodeView.from_options(options,continuation_eligible(row[0],json.loads(row[1]),options))
 
     def select_all_shows(self):
         self.shows.selection_set(0,'end')
@@ -317,7 +330,7 @@ class App:
         if self.cover_photo: self.cover_label.configure(image=self.cover_photo,text='',width=104 if self.compact else 132,height=148 if self.compact else 190,bg=self.palette['card'])
         else: self.cover_label.configure(image='',text='ANIME\n\n暂无封面',width=14 if self.compact else 17,height=8 if self.compact else 12,bg=self.palette['soft'])
         updated=time.strftime('%m-%d %H:%M',time.localtime(data.get('cached_at',time.time())))
-        self.detail_hint.set(f'Bangumi · {updated} 更新 · 每日补充 / 详情间隔 5h 刷新'+(' · 封面暂不可用' if data.get('cover_error') else ''))
+        self.detail_hint.set(f'Bangumi · {updated} 更新'+(' · 封面暂不可用' if data.get('cover_error') else ''))
 
     def open_bangumi(self):
         import webbrowser
@@ -343,7 +356,7 @@ class App:
         previous=getattr(self,'show_rows',[])
         selected_ids={previous[i][0] for i in old if i<len(previous)}
         self.show_rows = self.store.shows()
-        self.library_count.set(f'{len(self.show_rows)} 部追踪中 · Ctrl / Shift 多选')
+        self.library_count.set(f'{len(self.show_rows)} 部追踪中')
         self.shows.delete(0, 'end')
         for _, name, aliases in self.show_rows:
             self.shows.insert('end', name)
@@ -354,29 +367,40 @@ class App:
         self.refresh_candidates()
 
     def refresh_candidates(self):
+        previous_selection=set(self.tree.selection());position=self.tree.yview()[0] if self.tree.get_children() else 0
+        previous_sid=getattr(self,'candidate_sid',None)
         self.tree.delete(*self.tree.get_children()); self.items = {}
         row = self.selected_show()
+        self.candidate_sid=row[0] if row else None
         if not row or self.detail_sid!=row[0]:
             self.detail_sid=None; self.detail_data=None; self.cover_photo=None
             self.intro.pack_forget()
             if not self.welcome.winfo_manager(): self.welcome.pack(fill='x',before=self.resource_section,pady=(0,14))
         if row:
             first,last,completed=self.store.episode_rule(row[0])
-            self.first_ep.set(str(first)); self.last_ep.set(str(last) if last else '')
-            self.progress_label.set(f'最高已完成：{completed or "暂无"} · 追踪 {first}～{last or "不限"} · Ctrl / Shift 多选候选')
+            view=self.episode_view(row[0]);shown_first=view.display(first);shown_last=view.display(last)
+            self.first_ep.set(str(shown_first)); self.last_ep.set(str(shown_last) if last else '')
+            self.progress_label.set(f'已完成 {view.label(completed) if completed else "暂无"} · '+
+                                    ('本季 ' if view.enabled and view.range_basis=='local' else '全篇 ' if view.enabled else '追踪 ')+f'{shown_first}～{shown_last or "不限"}')
+            self.tree.heading('ep',text='本季 / 全篇' if view.enabled else '集数')
+            self.tree.column('ep',width=125 if view.enabled else 55,minwidth=125 if view.enabled else 55)
             for item in self.store.candidates(row[0]):
                 if item['episode'].startswith('待核对') and not self.show_unknown.get(): continue
                 hash_ = item['hash']; self.items[hash_] = item
-                ep = item['episode'] if not item['episode'].startswith('待核对') else '待核对'
+                ep = view.label(item['episode'])
                 self.tree.insert('', 'end', iid=hash_,tags=('even' if len(self.items)%2==0 else 'odd',), values=(ep, 'ANI' if item['ani'] else item.get('source','Nyaa'), item['subtitle'], item['seeds'] if item.get('seed_known',True) else '未知', item['size'], item['title']))
-        else: self.progress_label.set('选择新番后可设置独立集数范围')
+        else: self.progress_label.set('')
         self.resource_title.set(f'待下载资源  ·  {len(self.items)} 个候选')
+        if previous_sid==self.candidate_sid:
+            self.tree.selection_set([hash_ for hash_ in previous_selection if hash_ in self.items]);self.tree.yview_moveto(position)
+        self.library_tools.refresh_candidates()
 
     def apply_range(self, clear=False):
         row=self.selected_show()
         if not row: return
         try:
-            self.store.set_episode_range(row[0],1 if clear else int(self.first_ep.get()),0 if clear or not self.last_ep.get().strip() else int(self.last_ep.get()))
+            view=self.episode_view(row[0])
+            self.store.set_episode_range(row[0],1 if clear else view.storage(int(self.first_ep.get())),0 if clear or not self.last_ep.get().strip() else view.storage(int(self.last_ep.get())))
             self.refresh_candidates(); self.next_scan=time.monotonic()+2
             self.note('集数范围已保存；下载完成进度形成的下限仍生效')
         except ValueError as e: messagebox.showerror('集数范围错误',str(e))
@@ -402,9 +426,11 @@ class App:
                 self.note('下载完成监测暂不可用：'+error); self.progress_error=error
         self.background(work,done,key='monitor',on_error=failed)
 
-    def note(self, text):
-        self.status.set(text)
-        self.log.configure(state='normal'); self.log.insert('end', time.strftime('%H:%M:%S ') + text + '\n'); self.log.see('end'); self.log.configure(state='disabled')
+    def note(self, text, detail=False):
+        if not detail:self.status.set(text if len(text)<=110 else text[:107]+'…')
+        self.log.configure(state='normal'); self.log.insert('end', time.strftime('%H:%M:%S ') + text + '\n')
+        if int(self.log.index('end-1c').split('.')[0])>1500:self.log.delete('1.0','end-1000l')
+        self.log.see('end'); self.log.configure(state='disabled')
 
     @property
     def busy(self):
@@ -438,28 +464,48 @@ class App:
             self.scan()
         self.root.after(200, self.poll)
 
-    def scan(self):
-        if 'scan' in self.jobs: return
+    def scan_selected(self):
+        ids={self.show_rows[i][0] for i in self.shows.curselection()}
+        if not ids:self.note('请先选择动画');return
+        self.scan(ids)
+
+    def scan(self,ids=None):
+        if 'scan' in self.jobs:self.note('正在检查更新');return
         self.next_scan = time.monotonic() + int(self.store.setting('interval', '30')) * 60
         rows = self.store.shows()
+        if ids is not None:rows=[r for r in rows if r[0] in ids]
         rules={sid:self.store.episode_rule(sid) for sid,_,_ in rows}
+        search_aliases={sid:self.store.search_aliases(sid) for sid,_,_ in rows}
+        preferences={sid:self.store.show_options(sid) for sid,_,_ in rows}
         if not rows: return
-        self.note('正在检查 Nyaa 及按作品ID匹配的补充源…')
+        self.note('正在并行检查 Nyaa、蜜柑、動漫花園及作品ID补充源…')
         def progress(result):
             sid,name,items,errors,reports=result
             if sid in self.removed_shows: return
             self.store.ingest(sid,items); self.refresh_candidates()
-            self.note(f'{name}：匹配 {len(items)} 个资源，其中 ANI {sum(x["ani"] for x in items)} 个；查询失败 {len(errors)} 次')
+            self.note(f'{name} · 已找到 {len(items)} 个资源')
         def work():
             results=[]
-            for sid,name,aliases in rows:
-                if sid in self.removed_shows: continue
-                if self.cancelled.is_set(): break
+            def check(row):
+                sid,name,aliases=row
+                if sid in self.removed_shows or self.cancelled.is_set(): return None
                 first,last,_=rules[sid]
                 reports=[]
-                items,errors=search_show(json.loads(aliases), self.cancelled,first,last,diagnostics=reports)
-                result=(sid,name,items,errors,reports); results.append(result)
+                def partial(items):
+                    result=(sid,name,items,[],[])
+                    self.messages.put(('scan-progress',progress,result,None,None))
+                items,errors=search_show(search_aliases[sid], self.cancelled,first,last,diagnostics=reports,
+                                         on_progress=partial,cache_dir=self.store.root/'search-cache',request_control=self.search_limiter,
+                                         exclude_words=preferences[sid].get('exclude_words',[]))
+                result=(sid,name,items,errors,reports)
                 self.messages.put(('scan-progress',progress,result,None,None))
+                return result
+            # Cap total traffic at two shows x four sources. UI/SQLite writes stay on the UI thread.
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures=[pool.submit(check,row) for row in rows]
+                for future in as_completed(futures):
+                    result=future.result()
+                    if result is not None: results.append(result)
             return results
         def done(results):
             count = 0
@@ -468,23 +514,31 @@ class App:
             for sid, name, items, errors, reports in results:
                 if sid in self.removed_shows: continue
                 count += len(items)
-                report_data.append({'show_id':sid,'name':name,'queries':reports,'count':len(items),'ani':sum(x['ani'] for x in items),'first':rules[sid][0],'last':rules[sid][1]})
+                report_data.append({'show_id':sid,'name':name,'queries':reports,'count':len(items),'ani':sum(x['ani'] for x in items),'first':rules[sid][0],'last':rules[sid][1],'checked_at':time.time()})
                 failures += len(errors)
-                if errors: self.note(name + ' 部分搜索失败：' + '；'.join(errors))
-            (self.store.root/'last-search.json').write_text(json.dumps(report_data,ensure_ascii=False,indent=2),encoding='utf-8')
-            self.refresh_candidates(); self.note(f'检查完成：本轮匹配 {count} 个资源，失败 {failures} 个查询。候选仅为搜索命中，请核对。')
+                if errors: self.note(name + ' 部分搜索失败：' + '；'.join(errors),detail=True)
+            save_source_health(self.store.root/'source-health.json',report_data)
+            path=self.store.root/'last-search.json'
+            try:previous=json.loads(path.read_text(encoding='utf-8'))
+            except (OSError,ValueError):previous=[]
+            scanned={r['show_id'] for r in report_data}
+            current_ids={r[0] for r in self.store.shows()}
+            report_data=[r for r in previous if r.get('show_id') not in scanned and r.get('show_id') in current_ids]+report_data
+            path.write_text(json.dumps(report_data,ensure_ascii=False,indent=2),encoding='utf-8')
+            self.refresh_candidates(); self.note(f'已检查 {len(results)} 部动画 · 找到 {count} 个资源'+(' · 部分来源暂不可用' if failures else ''))
         self.background(work, done)
 
-    def search_diagnostics(self):
+    def search_diagnostics(self,sid=None):
         path=self.store.root/'last-search.json'
         if not path.exists(): self.note('请先执行一次检查更新，完成后查看诊断'); return
         win=tk.Toplevel(self.root); win.title('最近一次搜索诊断'); win.geometry('950x550')
         text=tk.Text(win,wrap='word'); text.pack(fill='both',expand=True,padx=10,pady=10)
         for report in json.loads(path.read_text(encoding='utf-8')):
+            if sid is not None and report.get('show_id')!=sid:continue
             text.insert('end',f"\n{report['name']}：去重后 {report['count']} 个，范围内ANI {report['ani']} 个；范围 {report.get('first','?')}～{report.get('last') or '不限'}\n")
             for q in report['queries']:
-                state='查询失败：'+q['error'] if q['error'] else ('成功但零结果' if not q['returned'] else '全部被作品/集数规则排除' if not q['kept'] else '查询成功')
-                text.insert('end',f"  {q['source']} | {q['query']} | {state} | 返回 {q['returned']} / 片名不符 {q.get('identity_rejected',0)} / 范围内 {q['kept']} / ANI返回 {q.get('ani_returned',q['ani'])} / ANI范围内 {q['ani']}\n")
+                state='查询失败：'+q['error'] if q['error'] else ('分集范围已核对' if q.get('episode_span') else '成功但零结果' if not q['returned'] else '全部被作品/集数规则排除' if not q['kept'] else '查询成功')
+                text.insert('end',f"  {q['source']} | {q['query']} | {state} | 返回 {q['returned']} / 片名不符 {q.get('identity_rejected',0)} / 集数排除 {q.get('range_rejected',0)} / 偏好排除 {q.get('preference_rejected',0)} / 范围内 {q['kept']} / ANI返回 {q.get('ani_returned',q['ani'])} / ANI范围内 {q['ani']} / 重试 {q.get('retries',0)} / 限速等待 {q.get('wait_seconds',0)}s / 退避 {q.get('cooldown_seconds',0)}s"+(' / '+q['warning'] if q.get('warning') else '')+'\n')
         text.configure(state='disabled')
 
     def add(self): self.editor()
@@ -705,8 +759,9 @@ class App:
             return None
         return self.items.get(sel[0]) if sel else None
 
-    def transfer(self):
-        item=self.selected_item(); row=self.selected_show()
+    def transfer(self,sid=None,item=None):
+        row=self.store.db.execute('SELECT id,name,aliases FROM shows WHERE id=?',(sid,)).fetchone() if sid is not None else self.selected_show()
+        item=item if item is not None else self.selected_item()
         if not item or not row or 'transfer' in self.jobs: return
         # The explicit button is the user's confirmation. Network and process launch run off the UI thread.
         dbroot=self.store.root
@@ -740,9 +795,9 @@ class App:
         count=self.store.clear_unknown(row[0])
         self.refresh_candidates(); self.note(f'已清除“{row[1]}”的 {count} 个待核对资源；以后搜索不再显示这些资源')
 
-    def open_page(self):
+    def open_page(self,item=None):
         import webbrowser
-        item=self.selected_item()
+        item=item if item is not None else self.selected_item()
         if item and any(item['page'].startswith(prefix) for prefix in ['https://nyaa.si/view/','https://animes.garden/detail/','https://mikanani.me/Home/Episode/','https://share.dmhy.org/topics/view/']): webbrowser.open(item['page'])
 
     def history(self):
@@ -783,7 +838,40 @@ class App:
 
 if __name__=='__main__':
     import argparse
-    parser=argparse.ArgumentParser(); parser.add_argument('--data-dir'); parser.add_argument('--smoke-test',action='store_true'); args=parser.parse_args()
+    parser=argparse.ArgumentParser(); parser.add_argument('--data-dir'); parser.add_argument('--smoke-test',action='store_true')
+    parser.add_argument('--tls-check',action='store_true');parser.add_argument('--network-check',metavar='BANGUMI_ID');args=parser.parse_args()
+    if args.tls_check:
+        import ssl,sys
+        if not args.data_dir:parser.error('--tls-check requires --data-dir for its output')
+        report={}
+        try:
+            context=ssl.create_default_context()
+            report=dict(ok=context.check_hostname and context.verify_mode==ssl.CERT_REQUIRED,
+                        hostname_check=context.check_hostname,verify_mode=int(context.verify_mode),openssl=ssl.OPENSSL_VERSION)
+        except Exception as e:report=dict(ok=False,error_type=type(e).__name__,error=str(e))
+        destination=Path(args.data_dir);destination.mkdir(parents=True,exist_ok=True)
+        (destination/'tls-check.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+        sys.exit(0 if report['ok'] else 1)
+    if args.network_check:
+        import sys
+        from core import search_fetch,parse_rss,parse_external_rss
+        if not args.data_dir or not args.network_check.isdigit():parser.error('--network-check requires a numeric subject and --data-dir')
+        destination=Path(args.data_dir);destination.mkdir(parents=True,exist_ok=True)
+        def detail():
+            data=DetailCache(destination).get(args.network_check,force=True)
+            return dict(cover_loaded=bool(data.get('cover_path')),score=data.get('score'))
+        checks=[('Bangumi',detail),
+                ('Nyaa',lambda:dict(resources=len(parse_rss(search_fetch('https://nyaa.si/?page=rss&c=1_0'))))),
+                ('Mikan',lambda:dict(resources=len(parse_external_rss(search_fetch('https://mikanani.me/RSS/Search?searchstr=ANi'),'Mikan')))),
+                ('DMHY',lambda:dict(resources=len(parse_external_rss(search_fetch('https://share.dmhy.org/topics/rss/rss.xml?keyword=ANi'),'DMHY')))),
+                ('AnimeGarden',lambda:dict(resources=len(json.loads(search_fetch('https://api.animes.garden/resources?pageSize=1'))['resources'])))]
+        def check(pair):
+            source,operation=pair
+            try:return dict(source=source,ok=True,**operation())
+            except Exception as e:return dict(source=source,ok=False,error_type=type(e).__name__,error=str(e))
+        with ThreadPoolExecutor(max_workers=4) as pool:results=list(pool.map(check,checks))
+        (destination/'network-check.json').write_text(json.dumps(results,ensure_ascii=False,indent=2),encoding='utf-8')
+        sys.exit(0 if all(r['ok'] for r in results) else 1)
     root=tk.Tk(); app=App(root,args.data_dir,prefetch=not args.smoke_test)
     if args.smoke_test:
         app.auto.set(False); app.next_progress=time.monotonic()+3600

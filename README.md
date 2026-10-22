@@ -6,19 +6,21 @@
 
 [![Windows build](https://github.com/YushiroYukina/aniferry/actions/workflows/windows-build.yml/badge.svg)](https://github.com/YushiroYukina/aniferry/actions/workflows/windows-build.yml)
 
-番舟是一款 Windows 本地追番桌面工具：追踪动画更新、从多个来源整理 BT 候选、查看 Bangumi 资料，并在人工确认后把种子交给下载器。原名“追番信箱”，当前版本 **1.10.0**。
+番舟是一款 Windows 本地追番桌面工具：追踪动画更新、从多个来源整理 BT 候选、查看 Bangumi 资料，并在人工确认后把种子交给下载器。原名“追番信箱”，当前版本 **1.11.1**；GitHub发行情况以Releases页面为准。
 
 ## 主要功能
 
 | 功能 | 说明 |
 | --- | --- |
-| 多名称、多源检索 | Nyaa按中文、日文、罗马音、英文分别搜索，结合AnimeGarden、蜜柑、動漫花園补充；同infohash去重，优先推荐ANI，否则每集最多3个候选 |
+| 多名称、多源检索 | 多源按中文、日文、罗马音、英文检索，分割季度经分集表核对后以总标题补搜，结合AnimeGarden分页、蜜柑、動漫花園补充；同infohash去重，优先推荐ANI，否则每集最多3个候选 |
 | 名称补全与连续添加 | 选择Bangumi作品后补全可获取的中日文、罗马音和英文名；保存后可立即继续录入，不等待资源搜索 |
 | 作品资料卡 | 封面、简介、评分、评分人数、排名与评分分布；首次预抓取、每日补充和5小时详情间隔缓存 |
 | 多下载器转交 | BitComet、qBittorrent、aria2、Motrix 1.x、迅雷；核对任务哈希与目录后确认接收 |
+| 双集数与追踪设置 | 续作及分割放送可按需启用本季/全篇双集数；设置页支持编号换算、补充别名及排除词 |
 | 按集追踪 | 每部独立设置集数范围；完整下载第n集后，弃置小于n−1的未转交候选 |
 | 批量整理 | 动画与候选多选、批量删除/忽略，一键清除当前动画的待核对候选并记住清理结果 |
 | 后续字幕工作流 | 标记标题声明中文、无中文、未知；导出已接收资源的字幕处理队列，不内置AI字幕生成 |
+| 简洁界面与二级入口 | 检查所选、推荐资源留在主界面；全部候选、追踪设置、来源状态及使用说明分层进入 |
 | 六套主题 | 青岚、暮紫、樱雾、暖杏、晴空、深海；圆角卡片、柔和光影，支持紧凑窗口 |
 
 ## 界面预览
@@ -40,11 +42,12 @@
 
 ### 普通用户
 
-到本仓库 [Releases](https://github.com/YushiroYukina/aniferry/releases) 下载 `AniFerry-1.10.0-Windows-x64.zip`，解压整个目录后双击 `AniFerry-1.10.0.exe`。无需另装Python，须保留同目录 `_internal/`。
+到本仓库 [Releases](https://github.com/YushiroYukina/aniferry/releases) 下载 `AniFerry-1.11.1-Windows-x64.zip`，解压整个目录后双击 `AniFerry-1.11.1.exe`。无需另装Python，须保留同目录 `_internal/`。
 
 1. 打开“设置”，选择自己的下载目录，配置下载器并测试连接。为兼容旧版，未设置时默认仍为 `E:\动画\202610\追番`；新用户应按实际盘符修改。
 2. 点击“添加追番”，查找并选用正确的Bangumi作品与季度，可连续添加多部。
-3. 查看候选并核对片名、集数、字幕标记，单选资源后点击“转交”。
+3. 点击“检查所选”刷新当前所选动画；工具菜单可检查全部。查看推荐或进入“全部候选”，选定资源后点击“转交”。
+4. 续作或分割放送可在“追踪设置”中启用双集数；来源状态与详细说明位于“工具”菜单。
 
 “待接收”表示已经提交但尚未核对成功；“已转交”表示任务哈希和目录已匹配，**不等于已下载完成**。
 
@@ -62,11 +65,11 @@ python -m venv .venv
 
 ## 当前验证与限制
 
-- 核心、Tk交互、资料缓存与下载器协议有55项本地回归测试；Windows打包程序通过启动检查。详细范围见[验证说明](docs/VALIDATION.md)。
+- 核心、Tk交互、资料缓存与下载器协议有84项本地回归测试；Windows打包程序通过启动检查。详细范围见[验证说明](docs/VALIDATION.md)。
 - qBittorrent、aria2和Motrix主要通过本地HTTP模拟服务验证协议；BitComet、迅雷的本机任务记录读取曾验证。新接入下载器尚无新任务完整下载验收，不把“启动成功”或“接口模拟通过”当作真实下载成功。
 - 搜索来源有近期结果数量、网络访问和命名差异限制；误匹配过滤不能替代人工核对。
 - 字幕标记根据资源标题判断，没有检查实际媒体字幕轨道。只下载种子内部分文件不会自动认定整集完成。
-- Windows发行包尚未代码签名；[GitHub Actions](https://github.com/YushiroYukina/aniferry/actions/runs/39095487280)已通过云端测试、Windows打包和启动检查。
+- Windows发行包尚未代码签名；此前1.10.0的[GitHub Actions](https://github.com/YushiroYukina/aniferry/actions/runs/39095487280)已通过云端构建；1.11.1的验证情况见验证说明。
 
 ## 数据与升级
 

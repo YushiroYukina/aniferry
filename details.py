@@ -8,7 +8,11 @@ from datetime import datetime,timezone,timedelta
 import urllib.parse
 from pathlib import Path
 from PIL import Image, ImageOps
-from core import fetch
+from core import search_fetch
+
+
+def fetch_detail(url,timeout=15):
+    return search_fetch(url,timeout=timeout)
 
 class DetailCache:
     TTL=5*60*60
@@ -16,7 +20,7 @@ class DetailCache:
 
     def __init__(self,root,fetcher=None):
         self.root=Path(root)/'bangumi-cache'
-        self.fetcher=fetcher or fetch
+        self.fetcher=fetcher or fetch_detail
         self._locks={}
         self._guard=threading.Lock()
 

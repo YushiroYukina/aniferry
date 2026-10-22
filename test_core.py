@@ -5,12 +5,231 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from core import *
+from tracking import EpisodeView, source_health, SearchLimiter, save_source_health
 
 def release(n, ep='1', ani=False, seeds=10):
     return dict(hash=str(n).zfill(40), title=f'[ANI] Test - {ep}' if ani else f'Test - {ep}',
                 episode=ep, ani=ani, seeds=seeds, subtitle='未知', size='1 GiB',url='https://nyaa.si/download/123.torrent')
 
 class Tests(unittest.TestCase):
+    def test_source_success_time_survives_failed_round_and_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'source-health.json'
+            save_source_health(path,[{'checked_at':100,'queries':[{'source':'Nyaa','error':'','returned':0,'kept':0}]}])
+            save_source_health(path,[{'checked_at':200,'queries':[{'source':'Nyaa','error':'EOF','returned':0,'kept':0}]}])
+            stored=json.loads(path.read_text(encoding='utf-8'))
+            actual=next(r for r in stored if r['source']=='Nyaa')
+            self.assertEqual(actual['last_success'],100);self.assertEqual(actual['last_attempt'],200)
+            self.assertEqual(actual['status'],'连接失败')
+            save_source_health(path,[])
+            self.assertEqual(next(r for r in json.loads(path.read_text(encoding='utf-8')) if r['source']=='Nyaa')['last_success'],100)
+
+    def test_episode_view_converts_both_numbering_modes_without_changing_history(self):
+        absolute=EpisodeView(True,12,'absolute','local')
+        self.assertEqual(absolute.label('15'),'3 / 总15')
+        self.assertEqual(absolute.storage(3),15);self.assertEqual(absolute.display(15),3)
+        self.assertEqual(absolute.display(0),0);self.assertEqual(absolute.storage(0),0)
+        local=EpisodeView(True,12,'local','absolute')
+        self.assertEqual(local.label('3'),'3 / 总15')
+        self.assertEqual(local.storage(15),3);self.assertEqual(local.display(3),15)
+        self.assertEqual(EpisodeView(False,12).label('15'),'15')
+        self.assertEqual(absolute.label('待核对:pack'),'待核对')
+
+    def test_show_options_are_per_show_and_dual_requires_continuation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s=Store(tmp)
+            try:
+                a=s.save_show('Test',{'英文名':'Test'});b=s.save_show('Test Part 2',{'英文名':'Test Part 2'})
+                with self.assertRaises(ValueError):s.set_show_options(a,{'dual':True,'offset':12})
+                s.set_show_options(b,{'dual':True,'offset':12,'numbering':'absolute'})
+                self.assertEqual(s.show_options(a),{});self.assertTrue(s.show_options(b)['dual'])
+                s.ingest(a,[release(1,'3')]);s.db.execute("UPDATE releases SET status='已完成' WHERE show_id=?",(a,));s.db.commit()
+                s.set_show_options(a,{'continuation':True,'dual':True,'offset':12,'numbering':'local'})
+                self.assertEqual(s.db.execute('SELECT episode FROM releases WHERE show_id=?',(a,)).fetchone()[0],'3')
+                s.delete_show(b);self.assertEqual(s.show_options(b),{})
+            finally:s.db.close()
+
+    def test_expanded_candidates_keep_handled_ignored_and_identity_rules(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s=Store(tmp)
+            try:
+                sid=s.save_show('Test',{'英文名':'Test'})
+                items=[release(n,'1',ani=n==1,seeds=n) for n in range(1,7)]+[release(9,'2')]
+                s.ingest(sid,items)
+                s.ignore_releases(sid,[release(3)['hash']])
+                s.db.execute("UPDATE releases SET status='已转交' WHERE show_id=? AND hash=?",(sid,release(9)['hash']));s.db.commit()
+                self.assertEqual(len(s.candidates(sid)),1)
+                self.assertEqual(len(s.candidates(sid,expanded=True)),5)
+                self.assertNotIn(release(3)['hash'],{x['hash'] for x in s.candidates(sid,expanded=True)})
+                s.set_show_options(sid,{'exclude_words':['[ANI]']})
+                self.assertEqual(len(s.candidates(sid)),3);self.assertEqual(len(s.candidates(sid,expanded=True)),4)
+                s.set_show_options(sid,{});self.assertEqual(len(s.candidates(sid,expanded=True)),5)
+            finally:s.db.close()
+
+    def test_supplementary_alias_is_used_at_ingest_and_does_not_rewrite_originals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            s=Store(tmp)
+            try:
+                sid=s.save_show('测试',{'中文名':'测试'})
+                s.set_show_options(sid,{'extra_aliases':['Test']})
+                s.ingest(sid,[release(1)])
+                self.assertEqual(len(s.candidates(sid)),1)
+                self.assertEqual(json.loads(s.shows()[0][2]),{'中文名':'测试'})
+                s.clean_mismatches();self.assertEqual(len(s.candidates(sid)),1)
+            finally:s.db.close()
+
+    def test_source_health_distinguishes_empty_success_failure_and_mixed(self):
+        reports=[{'checked_at':100,'queries':[{'source':'Nyaa','returned':0,'kept':0,'error':''},
+            {'source':'Mikan','returned':0,'kept':0,'error':'timeout'},
+            {'source':'DMHY','returned':1,'kept':1,'error':'','checked_at':90},
+            {'source':'DMHY','returned':0,'kept':0,'error':'EOF'}]}]
+        rows={r['source']:r for r in source_health(reports)}
+        self.assertEqual(rows['Nyaa']['status'],'连接正常');self.assertEqual(rows['Nyaa']['last_success'],100)
+        self.assertEqual(rows['Mikan']['status'],'连接失败');self.assertEqual(rows['Mikan']['last_success'],0)
+        self.assertEqual(rows['DMHY']['status'],'部分可用');self.assertEqual(rows['DMHY']['last_success'],90)
+        self.assertEqual(rows['AnimeGarden']['status'],'尚未检查')
+
+    def test_search_limiter_backoff_retry_after_and_cancellation(self):
+        limiter=SearchLimiter(interval=0,clock=lambda:100)
+        url='https://nyaa.si/test'
+        for _ in range(3):
+            with self.assertRaises(TimeoutError):limiter.request(url,lambda:(_ for _ in ()).throw(TimeoutError('offline')))
+        self.assertGreater(limiter.hosts['nyaa.si']['next'],100)
+        import threading
+        cancelled=threading.Event();cancelled.set()
+        with self.assertRaises(InterruptedError):limiter.request(url,lambda:None,cancelled)
+        fresh=SearchLimiter(interval=0,clock=lambda:100);report={}
+        error=urllib.error.HTTPError(url,429,'limited',{'Retry-After':'120'},None)
+        with self.assertRaises(urllib.error.HTTPError):fresh.request(url,lambda:(_ for _ in ()).throw(error),report=report)
+        self.assertEqual(report['cooldown_seconds'],120)
+
+    def test_search_publishes_first_query_before_later_query_finishes(self):
+        import concurrent.futures,threading
+        first=threading.Event();gate=threading.Event()
+        raw=b'<rss xmlns:n="https://nyaa.si/xmlns/nyaa"><channel><item><title>Test - 02</title><n:infoHash>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</n:infoHash></item></channel></rss>'
+        def response(url,**kwargs):
+            if 'Other' in url:gate.wait(3)
+            return raw
+        with patch('core.fetch',side_effect=response),concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future=executor.submit(search_show,{'英文名':'Test','罗马音':'Other'},use_garden=False,on_progress=lambda items:first.set())
+            try:
+                self.assertTrue(first.wait(2));self.assertFalse(future.done())
+            finally:gate.set()
+            items,errors=future.result(timeout=3)
+        self.assertEqual(len(items),1);self.assertEqual(errors,[])
+
+    def test_cour_span_cache_survives_restart_and_transient_metadata_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch('core.cour_episode_span',return_value=(13,24)) as request:
+                self.assertEqual(cached_cour_span('42',tmp),(13,24))
+                self.assertEqual(cached_cour_span('42',tmp),(13,24))
+                self.assertEqual(request.call_count,1)
+            path=Path(tmp)/'cour-42.json';obj=json.loads(path.read_text(encoding='utf-8'))
+            obj['checked_at']-=2*86400;path.write_text(json.dumps(obj),encoding='utf-8')
+            report={}
+            with patch('core.cour_episode_span',side_effect=TimeoutError('offline')):
+                self.assertEqual(cached_cour_span('42',tmp,report),(13,24));self.assertIn('复用',report['warning'])
+                obj['checked_at']-=31*86400;path.write_text(json.dumps(obj),encoding='utf-8')
+                with self.assertRaises(TimeoutError):cached_cour_span('42',tmp)
+
+    def test_cour_search_recovers_continuous_episode_without_previous_cour(self):
+        aliases={'中文名':'魔法姐妹露露特莉莉 第2部分','日文名':'魔法の姉妹ルルットリリィ 第2クール',
+                 '罗马音':'Mahou no Shimai LuluttoLilly Part 2','_bgm_id':'634210'}
+        titles=['[ANi] Mahō no Shimai Lulutto Lilly / 魔法姊妹露露特莉莉 - 15 [CHT]',
+                '魔法姊妹露露特莉莉 - 02','魔法姊妹露露特莉莉 - 25',
+                '魔法姊妹露露特莉莉 [特別篇] - 15','魔法姐妹露露特莉莉 第2部分 - 03',
+                '另一部魔法动画 - 15','魔法姐妹露露特莉莉 第1部分 - 15']
+        rss='<rss><channel>'+''.join(f'<item><title>{title}</title><enclosure url="magnet:?xt=urn:btih:{i:040x}"/></item>'
+                                  for i,title in enumerate(titles,1))+'</channel></rss>'
+        queried=[]
+        def response(url,**kwargs):
+            queried.append(url)
+            if '/v0/episodes?' in url:
+                return json.dumps({'data':[{'type':0,'subject_id':634210,'sort':n} for n in range(13,25)],'total':12}).encode()
+            if 'nyaa.si' in url: return b'<rss><channel/></rss>'
+            return rss.encode()
+        cour_episode_span.cache_clear()
+        try:
+            with patch('core.fetch',side_effect=response):
+                reports=[]
+                items,errors=search_show(aliases,first=3,use_garden=False,use_external=True,diagnostics=reports)
+            self.assertEqual(errors,[])
+            self.assertEqual({x['hash'] for x in items},{f'{1:040x}',f'{5:040x}'})
+            self.assertEqual({x['episode'] for x in items},{'15'})
+            self.assertTrue(all(x['subject_id']=='634210' for x in items))
+            self.assertTrue(any(q.get('episode_span')==[13,24] for q in reports))
+            with tempfile.TemporaryDirectory() as tmp:
+                store=Store(tmp)
+                try:
+                    sid=store.save_show('魔法姐妹露露特莉莉',aliases);store.set_episode_range(sid,3)
+                    store.ingest(sid,items)
+                    self.assertEqual([(x['episode'],x['ani']) for x in store.candidates(sid)],[('15',True)])
+                finally: store.db.close()
+        finally: cour_episode_span.cache_clear()
+
+    def test_cour_failure_does_not_relax_identity_or_strip_seasons(self):
+        self.assertEqual(cour_base('Test Season 2'),'Test Season 2')
+        self.assertEqual(cour_base('测试 第2季'),'测试 第2季')
+        self.assertEqual(cour_base('Test 2nd Cour'),'Test')
+        self.assertEqual(cour_base('Test Part 2'),'Test')
+        aliases={'英文名':'Test Part 2','_bgm_id':'42'}
+        raw=b'<rss xmlns:n="https://nyaa.si/xmlns/nyaa"><channel><item><title>Test - 15</title><n:infoHash>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</n:infoHash></item></channel></rss>'
+        with patch('core.cour_episode_span',side_effect=ValueError('unavailable')),patch('core.fetch',return_value=raw):
+            items,errors=search_show(aliases,use_garden=False)
+        self.assertEqual(items,[]);self.assertEqual(len(errors),1)
+
+    def test_roman_spelling_variants_preserve_word_boundaries(self):
+        self.assertTrue(matches_show({'title':'Mahō no Shimai Lulutto Lilly - 15'},
+                                     {'罗马音':'Mahou no Shimai LuluttoLilly'}))
+        self.assertTrue(matches_show({'title':'魔法姊妹露露特莉莉 - 15'},{'中文名':'魔法姐妹露露特莉莉'}))
+        for title in ['Contest - 01','Testament - 01','The Testing - 01']:
+            self.assertFalse(matches_show({'title':title},{'英文名':'Test'}))
+        self.assertFalse(matches_show({'title':'Test [特別篇] - 01'},{'英文名':'Test'}))
+
+    def test_external_sources_search_all_languages(self):
+        aliases={'中文名':'测试','日文名':'作品','罗马音':'Sakuhin','英文名':'Work','_bgm_id':'42'}
+        urls=[]
+        def response(url,**kwargs): urls.append(url);return b'<rss><channel/></rss>'
+        with patch('core.fetch',side_effect=response):
+            search_show(aliases,use_garden=False,use_external=True)
+        for host,param in [('mikanani.me','searchstr'),('share.dmhy.org','keyword')]:
+            actual={urllib.parse.parse_qs(urllib.parse.urlparse(u).query)[param][0] for u in urls if host in u}
+            self.assertEqual(actual,set(v for k,v in aliases.items() if not k.startswith('_')))
+
+    def test_search_retries_transient_failures_but_not_404_or_bad_certificate(self):
+        report={}
+        with patch('core.fetch',side_effect=[urllib.error.URLError('EOF'),b'ok']) as request,patch('core.time.sleep'):
+            self.assertEqual(search_fetch('https://nyaa.si',report=report),b'ok')
+            self.assertEqual(request.call_count,2);self.assertEqual(report['retries'],1)
+        failures=[urllib.error.HTTPError('https://nyaa.si',404,'not found',{},None),
+                  urllib.error.URLError(ssl.SSLCertVerificationError('bad certificate'))]
+        for error in failures:
+            with patch('core.fetch',side_effect=error) as request:
+                with self.assertRaises((OSError,urllib.error.URLError)):search_fetch('https://nyaa.si')
+                self.assertEqual(request.call_count,1)
+
+    def test_garden_pagination_follows_complete_flag_and_preserves_identity(self):
+        pages=[]
+        def response(url,**kwargs):
+            if 'nyaa.si' in url:return b'<rss><channel/></rss>'
+            q=urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            if 'fansub' in q:return b'{"status":"OK","resources":[],"pagination":{"complete":true}}'
+            page=int(q['page'][0]);pages.append(page)
+            entry={'subjectId':42,'type':'动画','title':f'Test - {page:02d}',
+                   'magnet':'magnet:?xt=urn:btih:'+str(page)*40,'provider':'dmhy','providerId':str(page)}
+            return json.dumps({'status':'OK','resources':[entry],'pagination':{'complete':page==2}}).encode()
+        with patch('core.fetch',side_effect=response):
+            items,errors=search_show({'英文名':'Test','_bgm_id':'42'},use_external=False)
+        self.assertEqual(errors,[]);self.assertEqual(pages,[1,2]);self.assertEqual(len(items),2)
+
+    def test_nyaa_ani_query_is_not_crowded_out_by_rss_limit(self):
+        ordinary=[release(i+1) for i in range(75)]; ani=dict(release(99,ani=True),source='Nyaa')
+        with patch('core.fetch',return_value=b'xml') as request,patch('core.parse_rss',side_effect=[ordinary,[ani]]):
+            items,errors=search_show({'英文名':'Test'},use_garden=False)
+        self.assertEqual(errors,[]);self.assertEqual(len(items),76)
+        query=urllib.parse.parse_qs(urllib.parse.urlparse(request.call_args.args[0]).query)['q'][0]
+        self.assertIn('ANI',query)
+
     def test_rank_by_episode(self):
         items=[release(i,seeds=i) for i in range(1,7)]+[release(7,'2',True,0),release(8,'2',False,999)]
         got=recommend(items,set())
@@ -156,7 +375,7 @@ class Tests(unittest.TestCase):
 
     def test_search_diagnostics_distinguishes_failure_zero_and_filtered(self):
         raw=b'<rss xmlns:n="https://nyaa.si/xmlns/nyaa"><channel><item><title>Test - 02</title><n:infoHash>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</n:infoHash></item></channel></rss>'
-        with patch('core.fetch',side_effect=[raw,b'<rss><channel/></rss>',TimeoutError('timeout')]),patch('core.time.sleep'):
+        with patch('core.fetch',side_effect=[raw,b'<rss><channel/></rss>',TimeoutError('timeout'),TimeoutError('timeout')]),patch('core.time.sleep'):
             reports=[]
             items,errors=search_show({'中文名':'a','日文名':'b','罗马音':'c','_bgm_id':'42'},first=4,diagnostics=reports,use_garden=False)
             self.assertEqual(items,[]); self.assertEqual(len(errors),1); self.assertEqual(len(reports),3)

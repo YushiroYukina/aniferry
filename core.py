@@ -9,6 +9,10 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 import unicodedata
 import base64
+import ssl
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue, Empty
 from functools import lru_cache
 from html.parser import HTMLParser
 from contextlib import closing
@@ -30,7 +34,27 @@ def title_key(text):
         if size:
             result=ctypes.create_unicode_buffer(size+1)
             if convert('zh-CN',0x02000000,text,len(text),result,size,None,None,0): text=result.value
-    return ''.join(c for c in text if c.isalnum())
+    return ''.join(c for c in text if c.isalnum()).replace('姊妹','姐妹')
+
+
+def roman_tokens(text):
+    text=unicodedata.normalize('NFKC',text).casefold().replace('ō','ou').replace('ū','uu')
+    text=''.join(c for c in unicodedata.normalize('NFKD',text) if not unicodedata.combining(c))
+    return re.findall(r'[a-z0-9]+',text.replace("'",'').replace('’',''))
+
+
+def cour_base(text):
+    # Only split-cour/part labels: never strip Season 2 / 第2季 or arbitrary sequel numbers.
+    return re.sub(r'\s*(?:第\s*[0-9一二三四五六七八九十]+\s*(?:部分|クール)|(?:part|cour)\s*\d+|\d+(?:st|nd|rd|th)\s+cour)\s*$', '',
+                  unicodedata.normalize('NFKC',text),flags=re.I).strip()
+
+
+def cour_index(text):
+    match=re.search(r'第\s*([0-9一二三四五六七八九十]+)\s*(?:部分|クール)|\b(?:part|cour)\s*(\d+)|\b(\d+)(?:st|nd|rd|th)\s+cour',
+                    unicodedata.normalize('NFKC',text),re.I)
+    if not match: return None
+    number=next(g for g in match.groups() if g)
+    return int(number) if number.isdigit() else dict(zip('一二三四五六七八九十',range(1,11))).get(number)
 
 def title_season(text):
     text=unicodedata.normalize('NFKC',text).casefold()
@@ -42,14 +66,28 @@ def title_season(text):
         if '第'+ch+'季' in text or '第'+ch+'期' in text: return number
     return None
 
+
+def continuation_eligible(name, aliases, options=None):
+    options=options or {}
+    if 'continuation' in options: return bool(options['continuation'])
+    names=[name]+[v for k,v in aliases.items() if not k.startswith('_') and isinstance(v,str)]
+    return any(cour_index(v) is not None or (title_season(v) or 1)>1 for v in names)
+
 def matches_show(item,aliases):
     if re.search(r'OPテーマ|EDテーマ|\bOST\b|soundtrack|主題歌|主题曲|原声集|原聲集',item.get('title',''),re.I): return False
+    special=r'特別篇|特别篇|特別編|特别编|総集編|总集篇|\b(?:SP|OVA|OAD|NCOP|NCED)\b'
+    if re.search(special,item.get('title',''),re.I) and not any(
+            re.search(special,v,re.I) for k,v in aliases.items() if not k.startswith('_') and isinstance(v,str)):
+        return False
     expected=str(aliases.get('_bgm_id',''))
     found=str(item.get('subject_id',''))
     if found:
         if expected: return expected==found
     title=item.get('title','')
     names=[v for k,v in aliases.items() if not k.startswith('_') and isinstance(v,str) and v.strip()]
+    parts={cour_index(n) for n in names}-{None}
+    actual_part=cour_index(title)
+    if actual_part and (parts and actual_part not in parts or not parts and actual_part>1): return False
     seasons={title_season(n) for n in names}-{None}
     actual=title_season(title)
     if actual and (seasons and actual not in seasons or not seasons and actual>1): return False
@@ -59,9 +97,14 @@ def matches_show(item,aliases):
         if re.search(r'[^\x00-\x7f]',name):
             if title_key(name) in key: return True
         else:
-            tokens=lambda s: re.findall(r'[a-z0-9]+',unicodedata.normalize('NFKC',s).casefold().replace("'",'').replace('’',''))
-            needle=tokens(name); hay=tokens(title)
-            if needle and any(hay[i:i+len(needle)]==needle for i in range(len(hay)-len(needle)+1)): return True
+            needle=''.join(roman_tokens(name)); hay=roman_tokens(title)
+            # Permit LuluttoLilly / Lulutto Lilly but retain whole-token boundaries.
+            for start in range(len(hay)):
+                candidate=''
+                for token in hay[start:]:
+                    candidate+=token
+                    if candidate==needle: return True
+                    if len(candidate)>=len(needle): break
     return False
 
 def parse_external_rss(raw,source):
@@ -235,6 +278,7 @@ class Store:
           CREATE TABLE IF NOT EXISTS episode_rules(show_id INTEGER PRIMARY KEY,
             first INTEGER DEFAULT 1,last INTEGER DEFAULT 0,completed INTEGER DEFAULT 0);
           CREATE TABLE IF NOT EXISTS deleted_shows(id INTEGER PRIMARY KEY,name TEXT,deleted_at REAL);
+          CREATE TABLE IF NOT EXISTS show_options(show_id INTEGER PRIMARY KEY,options TEXT NOT NULL);
         ''')
         self.db.commit()
 
@@ -269,7 +313,7 @@ class Store:
 
     def clean_mismatches(self):
         count=0
-        aliases={sid:json.loads(raw) for sid,_,raw in self.shows()}
+        aliases={sid:self.search_aliases(sid) for sid,_,raw in self.shows()}
         for sid,hash_,raw in self.db.execute("SELECT show_id,hash,payload FROM releases WHERE status IN ('待确认','忽略')").fetchall():
             if sid in aliases and not matches_show(json.loads(raw),aliases[sid]):
                 self.db.execute("UPDATE releases SET status='误匹配' WHERE show_id=? AND hash=?",(sid,hash_)); count+=1
@@ -290,6 +334,7 @@ class Store:
                 self.db.execute('DELETE FROM releases WHERE show_id=?',(sid,))
                 self.db.execute('DELETE FROM handoffs WHERE show_id=?',(sid,))
                 self.db.execute('DELETE FROM episode_rules WHERE show_id=?',(sid,))
+                self.db.execute('DELETE FROM show_options WHERE show_id=?',(sid,))
                 self.db.execute('DELETE FROM shows WHERE id=?',(sid,))
         self.export_queue()
         report_path=self.root/'last-search.json'
@@ -338,7 +383,7 @@ class Store:
     def ingest(self, sid, items):
         row=self.db.execute('SELECT aliases FROM shows WHERE id=?',(sid,)).fetchone()
         if not row: return
-        aliases=json.loads(row[0])
+        aliases=self.search_aliases(sid)
         first,last,_ = self.episode_rule(sid)
         for item in items:
             if not matches_show(item,aliases): continue
@@ -349,7 +394,36 @@ class Store:
                             (sid, item['hash'], item['title'], item['episode'], json.dumps(item, ensure_ascii=False)))
         self.db.commit()
 
-    def candidates(self, sid):
+    def show_options(self,sid):
+        row=self.db.execute('SELECT options FROM show_options WHERE show_id=?',(sid,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def set_show_options(self,sid,options):
+        row=self.db.execute('SELECT name,aliases FROM shows WHERE id=?',(sid,)).fetchone()
+        if not row: raise ValueError('动画已删除')
+        offset=options.get('offset',0)
+        if type(offset) is not int or not 0<=offset<=998: raise ValueError('前序集数须为0～998')
+        if options.get('numbering','absolute') not in ('local','absolute') or options.get('range_basis','local') not in ('local','absolute'):
+            raise ValueError('编号方式不正确')
+        if options.get('dual') and not continuation_eligible(row[0],json.loads(row[1]),options):
+            raise ValueError('双集数仅用于续作或分割放送')
+        if not isinstance(options.get('extra_aliases',[]),list) or len(options.get('extra_aliases',[]))>8:
+            raise ValueError('补充名称最多8个')
+        for key in ('extra_aliases','exclude_words'):
+            values=options.get(key,[])
+            if not isinstance(values,list) or len(values)>20 or any(not isinstance(v,str) or not 1<=len(v)<=160 for v in values):
+                raise ValueError('补充名称或排除词格式不正确')
+        self.db.execute('INSERT OR REPLACE INTO show_options VALUES(?,?)',(sid,json.dumps(options,ensure_ascii=False)))
+        self.db.commit()
+
+    def search_aliases(self,sid):
+        row=self.db.execute('SELECT aliases FROM shows WHERE id=?',(sid,)).fetchone()
+        aliases=json.loads(row[0]) if row else {}
+        for i,value in enumerate(self.show_options(sid).get('extra_aliases',[])):
+            aliases[f'补充名称{i}']=value
+        return aliases
+
+    def candidates(self, sid, expanded=False):
         rows = self.db.execute('SELECT payload,status,episode,hash FROM releases WHERE show_id=?', (sid,)).fetchall()
         handled = set()
         for _, status, ep, hash_ in rows:
@@ -359,10 +433,13 @@ class Store:
         items = [json.loads(r[0]) for r in rows if r[1] == '待确认']
         row=self.db.execute('SELECT aliases FROM shows WHERE id=?',(sid,)).fetchone()
         if not row: return []
-        items=[x for x in items if matches_show(x,json.loads(row[0]))]
+        aliases=self.search_aliases(sid)
+        excluded=self.show_options(sid).get('exclude_words',[])
+        items=[x for x in items if matches_show(x,aliases) and not any(w.casefold() in x['title'].casefold() for w in excluded)]
         items = [x for x in items if episode_number(x['episode']) is None or
                  first <= int(x['episode']) and (not last or int(x['episode']) <= last)]
-        return sorted(recommend(items, handled),key=lambda x:(episode_number(x['episode']) is None,episode_number(x['episode']) or 0,-x['ani'],-x['seeds']))
+        eligible=[x for x in items if x['episode'] not in handled and x['hash'] not in handled]
+        return sorted(eligible if expanded else recommend(items, handled),key=lambda x:(episode_number(x['episode']) is None,episode_number(x['episode']) or 0,-x['ani'],-x['seeds']))
 
     def episode_rule(self, sid):
         row=self.db.execute('SELECT first,last,completed FROM episode_rules WHERE show_id=?',(sid,)).fetchone()
@@ -466,7 +543,9 @@ class Store:
     def transfer(self, sid, item, backend=None):
         row=self.db.execute('SELECT aliases FROM shows WHERE id=?',(sid,)).fetchone()
         if not row: raise ValueError('该动画已删除，停止转交')
-        if not matches_show(item,json.loads(row[0])): raise ValueError('资源片名与当前动画不符，停止转交')
+        if not matches_show(item,self.search_aliases(sid)): raise ValueError('资源片名与当前动画不符，停止转交')
+        if any(w.casefold() in item['title'].casefold() for w in self.show_options(sid).get('exclude_words',[])):
+            raise ValueError('资源已被本番排除词过滤')
         # An existing handoff belongs to its original downloader, regardless of the current default.
         if self.db.execute("SELECT 1 FROM releases WHERE show_id=? AND episode=? AND status IN ('待接收','已转交','已完成')", (sid, item['episode'])).fetchone():
             raise ValueError('本集已有转交记录')
@@ -667,65 +746,191 @@ def resolve_torrent_url(item):
         if allowed_torrent_url(url,item['hash']): return url
     raise ValueError('补充源没有可下载的对应种子，请打开资源页面核对')
 
-def search_show(aliases, cancelled=None, first=1, last=0, diagnostics=None, use_garden=True, use_external=None):
+def search_fetch(url, cancelled=None, report=None, timeout=10):
+    """Retry transient search failures once; never weaken TLS or retry bad input."""
+    for attempt in range(2):
+        if cancelled and cancelled.is_set(): raise InterruptedError('搜索已取消')
+        try:
+            return fetch(url,timeout=timeout)
+        except (urllib.error.URLError, OSError) as error:
+            retryable=not isinstance(error,urllib.error.HTTPError) or error.code in (408,429,500,502,503,504)
+            certificate=isinstance(error,ssl.SSLCertVerificationError) or isinstance(getattr(error,'reason',None),ssl.SSLCertVerificationError)
+            if attempt or not retryable or certificate: raise
+            if report is not None: report['retries']=report.get('retries',0)+1
+            if cancelled:
+                if cancelled.wait(.25): raise InterruptedError('搜索已取消')
+            else: time.sleep(.25)
+
+
+@lru_cache(maxsize=128)
+def cour_episode_span(subject, day):
+    # Use the subject's actual episode table, not an assumed 12/13-episode offset.
+    raw=json.loads(search_fetch('https://api.bgm.tv/v0/episodes?'+urllib.parse.urlencode(
+        {'subject_id':subject,'type':0,'limit':100})))
+    rows=[r for r in raw.get('data',[]) if r.get('type')==0 and str(r.get('subject_id'))==str(subject)]
+    values=[r.get('sort') for r in rows]
+    if not rows or raw.get('total',len(rows))>len(rows) or not all(
+            isinstance(n,(int,float)) and n>0 and int(n)==n for n in values):
+        raise ValueError('分集资料不完整，保留完整标题检索')
+    numbers=sorted(set(int(n) for n in values))
+    if numbers[0]<=1 or numbers!=list(range(numbers[0],numbers[-1]+1)):
+        raise ValueError('未确认连续编号的后半部范围，保留完整标题检索')
+    return numbers[0],numbers[-1]
+
+
+def cached_cour_span(subject, cache_dir=None, report=None):
+    """Persist only validated spans. Reuse for a day, retain a 30-day offline fallback."""
+    saved=None; path=Path(cache_dir)/f'cour-{subject}.json' if cache_dir else None
+    if path:
+        try:
+            obj=json.loads(path.read_text(encoding='utf-8'))
+            span=obj['span']; age=time.time()-obj['checked_at']
+            if (str(obj['subject'])==str(subject) and len(span)==2 and
+                    all(type(n) is int for n in span) and 1<span[0]<=span[1]<=10000 and
+                    span[1]-span[0]<100 and 0<=age<=30*86400):
+                saved=tuple(span)
+                if age<86400:
+                    if report is not None: report['cache_state']='本地已核对分集范围'
+                    return saved
+        except (OSError,ValueError,TypeError,KeyError): pass
+    try:
+        span=cour_episode_span(str(subject),time.strftime('%Y-%m-%d'))
+    except Exception as e:
+        if saved:
+            if report is not None: report['warning']='分集刷新失败，复用30天内已核对范围：'+str(e)
+            return saved
+        raise
+    if path:
+        temporary=path.with_suffix(f'.{time.time_ns()}.tmp')
+        try:
+            path.parent.mkdir(parents=True,exist_ok=True)
+            temporary.write_text(json.dumps({'subject':str(subject),'span':span,'checked_at':time.time()}),encoding='utf-8')
+            temporary.replace(path)
+        except OSError as e:
+            if report is not None: report['warning']='分集范围已核对，但缓存保存失败：'+str(e)
+        finally: temporary.unlink(missing_ok=True)
+    return span
+
+
+def search_words(aliases):
+    words=list(dict.fromkeys(v.strip() for k,v in aliases.items()
+        if not k.startswith('_') and isinstance(v,str) and v.strip()))
+    # Publishers use both 姐妹 and 姊妹; this is a spelling variant, not fuzzy matching.
+    for word in list(words):
+        if '姐妹' in word: words.append(word.replace('姐妹','姊妹'))
+        elif '姊妹' in word: words.append(word.replace('姊妹','姐妹'))
+    return list(dict.fromkeys(words))
+
+
+def search_show(aliases, cancelled=None, first=1, last=0, diagnostics=None, use_garden=True, use_external=None, on_progress=None, cache_dir=None, request_control=None, exclude_words=()):
     merged, errors = {}, []
     reports=diagnostics if diagnostics is not None else []
-    def include(items):
-        kept=[]
-        for item in items:
-            if not matches_show(item,aliases): continue
-            ep=episode_number(item['episode'])
-            if ep is not None and (ep<first or last and ep>last): continue
-            kept.append(item); merge_release(merged,item)
-        return kept
-    for word in dict.fromkeys(s.strip() for key,s in aliases.items() if not key.startswith('_') and isinstance(s,str) and s.strip()):
-        if cancelled and cancelled.is_set(): break
-        report={'source':'Nyaa','query':word,'returned':0,'kept':0,'ani':0,'error':''}
-        try:
-            query=episode_query('"'+word.replace('"','')+'"',first)
-            url = 'https://nyaa.si/?' + urllib.parse.urlencode(dict(page='rss', q=query, c='1_0', f='0'))
-            items=parse_rss(fetch(url)); kept=include(items)
-            report.update(returned=len(items),kept=len(kept),ani=sum(x['ani'] for x in kept),ani_returned=sum(x['ani'] for x in items),identity_rejected=sum(not matches_show(x,aliases) for x in items))
-        except Exception as e:
-            errors.append(f'{word}: {e}')
-            report['error']=str(e)
-        reports.append(report)
-        time.sleep(1)
-    if use_garden and not (cancelled and cancelled.is_set()):
-        subject=aliases.get('_bgm_id','')
-        try:
-            if not subject:
-                subject=resolve_subject(aliases.get('中文名',''),aliases.get('日文名',''))
-            if not str(subject).isdigit(): raise ValueError('作品ID未匹配；请编辑名称并选择正确作品后保存')
-            # Query ANI separately so it cannot be crowded out by other uploaders.
-            for fansub in ['ANi','']:
-                if cancelled and cancelled.is_set(): break
-                report={'source':'AnimeGarden','query':f'作品ID {subject}'+(' / ANi' if fansub else ''),'returned':0,'kept':0,'ani':0,'error':''}
-                try:
-                    params={'subject':subject,'page':1,'pageSize':100,'type':'动画'}
-                    if fansub: params['fansub']=fansub
-                    items=parse_garden(fetch('https://api.animes.garden/resources?'+urllib.parse.urlencode(params)),subject)
-                    kept=include(items); report.update(returned=len(items),kept=len(kept),ani=sum(x['ani'] for x in kept),ani_returned=sum(x['ani'] for x in items),identity_rejected=sum(not matches_show(x,aliases) for x in items))
-                except Exception as e:
-                    errors.append('AnimeGarden: '+str(e)); report['error']=str(e)
-                reports.append(report)
-        except Exception as e:
-            errors.append('AnimeGarden: '+str(e))
-            reports.append({'source':'AnimeGarden','query':'匹配作品ID','returned':0,'kept':0,'ani':0,'error':str(e)})
+    effective=dict(aliases); span=None
     if use_external is None: use_external=use_garden
-    if use_external:
-        words=list(dict.fromkeys(x for x in [aliases.get('中文名') or aliases.get('日文名'),aliases.get('罗马音') or aliases.get('英文名')] if x))
-        for source,base,param in [('Mikan','https://mikanani.me/RSS/Search','searchstr'),('DMHY','https://share.dmhy.org/topics/rss/rss.xml','keyword')]:
+    originals=search_words(aliases)
+    bases=[cour_base(v) for v in originals]
+    if any(v!=b for v,b in zip(originals,bases)) and str(aliases.get('_bgm_id','')).isdigit():
+        report={'source':'Bangumi','query':'核对后半部分集编号','returned':0,'kept':0,'ani':0,'error':'','checked_at':time.time()}
+        try:
+            span=cached_cour_span(str(aliases['_bgm_id']),cache_dir,report)
+            report.update(returned=span[1]-span[0]+1,episode_span=list(span),query=f'后半部对应全篇第 {span[0]}～{span[1]} 集')
+            for i,(name,base) in enumerate(zip(originals,bases)):
+                if base!=name and len(title_key(base))>=4: effective[f'总标题{i}']=base
+        except Exception as e: report['error']=str(e); errors.append('Bangumi: '+str(e))
+        reports.append(report)
+    words=search_words(effective)
+    if span:
+        # A total-title query also matches a release carrying the longer Part 2 title.
+        # Avoid spending another round of requests on the known over-specific labels.
+        words=list(dict.fromkeys(cour_base(word) for word in words))
+
+    def stopped(): return bool(cancelled and cancelled.is_set())
+    batches=Queue()
+
+    def source_queries(source):
+        local=[]
+        def query(word,url,parser):
+            report={'source':source,'query':word,'returned':0,'kept':0,'ani':0,'error':''}
+            started=time.monotonic()
+            try:
+                operation=lambda:search_fetch(url,cancelled,report)
+                raw=request_control.request(url,operation,cancelled,report) if request_control else operation()
+                items=parser(raw)
+                local.append((items,report)); batches.put((items,report)); return raw,items
+            except Exception as e:
+                report['error']=str(e) or type(e).__name__; local.append(([],report)); batches.put(([],report)); return None,[]
+            finally:
+                report.update(checked_at=time.time(),elapsed=round(time.monotonic()-started,2))
+
+        if source=='AnimeGarden':
+            try:
+                subject=aliases.get('_bgm_id') or resolve_subject(aliases.get('中文名',''),aliases.get('日文名',''))
+                if not str(subject).isdigit(): raise ValueError('作品ID未匹配；请编辑名称并选择正确作品后保存')
+                for fansub in ['ANi','']:
+                    seen=set()
+                    for page in range(1,4):
+                        if stopped(): break
+                        params={'subject':subject,'page':page,'pageSize':100,'type':'动画'}
+                        if fansub: params['fansub']=fansub
+                        label=f'作品ID {subject}'+(' / ANi' if fansub else '')+f' / 第{page}页'
+                        raw,items=query(label,'https://api.animes.garden/resources?'+urllib.parse.urlencode(params),lambda r:parse_garden(r,subject))
+                        if raw is None: break
+                        obj=json.loads(raw); hashes={x['hash'] for x in items}
+                        pagination=obj.get('pagination',{})
+                        more=pagination.get('complete') is False or (not pagination and len(obj.get('resources',[]))>=100)
+                        if not more or not hashes-seen: break
+                        seen.update(hashes)
+                        if page==3: local[-1][1]['warning']='仍有更多历史资源，本轮已达3页上限'
+            except Exception as e:
+                pair=([],{'source':source,'query':'匹配作品ID','returned':0,'kept':0,'ani':0,'error':str(e),'checked_at':time.time()})
+                local.append(pair);batches.put(pair)
+        else:
             for word in words:
-                if cancelled and cancelled.is_set(): break
-                report={'source':source,'query':word,'returned':0,'kept':0,'ani':0,'error':''}
-                try:
-                    items=parse_external_rss(fetch(base+'?'+urllib.parse.urlencode({param:word}),timeout=15),source)
-                    kept=include(items)
-                    report.update(returned=len(items),kept=len(kept),ani=sum(x['ani'] for x in kept),ani_returned=sum(x['ani'] for x in items),identity_rejected=sum(not matches_show(x,aliases) for x in items))
-                except Exception as e:
-                    report['error']=str(e); errors.append(source+': '+str(e))
-                reports.append(report)
+                if stopped(): break
+                if source=='Nyaa':
+                    q=episode_query('"'+word.replace('"','')+'"',max(first,span[0]) if span else first)
+                    url='https://nyaa.si/?'+urllib.parse.urlencode(dict(page='rss',q=q,c='1_0',f='0'))
+                    _,items=query(word,url,parse_rss)
+                    if len(items)>=75 and not any(x['ani'] for x in items) and not stopped():
+                        ani_url='https://nyaa.si/?'+urllib.parse.urlencode(dict(page='rss',q=q+' ANI',c='1_0',f='0'))
+                        query(word+' / ANI补搜',ani_url,parse_rss)
+                else:
+                    base,param={'Mikan':('https://mikanani.me/RSS/Search','searchstr'),
+                                'DMHY':('https://share.dmhy.org/topics/rss/rss.xml','keyword')}[source]
+                    query(word,base+'?'+urllib.parse.urlencode({param:word}),lambda r:parse_external_rss(r,source))
+        return local
+
+    sources=['Nyaa']+(['AnimeGarden'] if use_garden else [])+(['Mikan','DMHY'] if use_external else [])
+    # Different sources run concurrently; a timeout on one cannot hold up the others.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures=[pool.submit(source_queries,source) for source in sources if not stopped()]
+        while any(not future.done() for future in futures) or not batches.empty():
+            try: items,report=batches.get(timeout=.1)
+            except Empty: continue
+            kept=[]; rejected=0; ranged=0; excluded=0;changed=False
+            for original in items:
+                if not matches_show(original,effective): rejected+=1; continue
+                if any(w.casefold() in original['title'].casefold() for w in exclude_words): excluded+=1; continue
+                item=dict(original)
+                ep=episode_number(item['episode'])
+                if span and ep is not None and ep<span[0] and ep<=span[1]-span[0]+1 and matches_show(original,aliases):
+                    # An explicitly identified cour may restart numbering from 01.
+                    item['source_episode']=str(ep); ep+=span[0]-1; item['episode']=str(ep)
+                if ep is not None and (ep<first or last and ep>last or span and not span[0]<=ep<=span[1]):
+                    ranged+=1; continue
+                # Unnumbered packs cannot prove that they belong to this cour.
+                if span and ep is None: ranged+=1; continue
+                if span:
+                    item['subject_id']=str(aliases['_bgm_id'])
+                    item['identity_basis']='Bangumi分集范围及总标题匹配'
+                kept.append(item);previous=merged.get(item['hash']);merge_release(merged,item)
+                changed=changed or previous!=merged.get(item['hash'])
+            report.update(returned=len(items),kept=len(kept),ani=sum(x['ani'] for x in kept),
+                          ani_returned=sum(x['ani'] for x in items),identity_rejected=rejected,range_rejected=ranged,preference_rejected=excluded)
+            reports.append(report)
+            if report['error']: errors.append(report['source']+' / '+report['query']+': '+report['error'])
+            if changed and on_progress and not stopped(): on_progress(list(merged.values()))
+        for future in futures: future.result()
     return list(merged.values()), errors
 
 def lookup(name):

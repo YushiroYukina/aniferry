@@ -14,6 +14,101 @@ def button(parent, label):
         if found: return found
 
 class UITests(unittest.TestCase):
+    def test_background_candidate_refresh_preserves_selection(self):
+        from test_core import release
+        sid=self.app.store.save_show('Test',{'英文名':'Test'})
+        self.app.store.ingest(sid,[release(1,'1'),release(2,'2')]);self.app.refresh_shows()
+        self.app.tree.selection_set(release(2)['hash'])
+        self.app.store.ingest(sid,[release(3,'3')]);self.app.refresh_candidates()
+        self.assertEqual(self.app.tree.selection(),(release(2)['hash'],))
+
+    def test_cour_options_prefill_cached_offset_but_do_not_enable_dual(self):
+        import json
+        sid=self.app.store.save_show('Test Part 2',{'英文名':'Test Part 2','_bgm_id':'42'})
+        cache=self.app.store.root/'search-cache';cache.mkdir()
+        (cache/'cour-42.json').write_text(json.dumps({'subject':'42','span':[13,24],'checked_at':time.time()}),encoding='utf-8')
+        self.app.refresh_shows()
+        with patch('library_ui.cached_cour_span',side_effect=AssertionError('Opening settings must not fetch')):
+            self.app.library_tools.preferences()
+        win=self.app.library_tools.windows[('preferences',sid)]
+        self.assertFalse(win.dual_var.get());self.assertEqual(win.offset_var.get(),'12')
+        self.assertEqual(self.app.store.show_options(sid),{})
+
+    def test_dual_numbering_is_opt_in_and_range_uses_selected_basis(self):
+        import json
+        from test_core import release
+        sid=self.app.store.save_show('Test Part 2',{'英文名':'Test Part 2'})
+        self.app.store.ingest(sid,[dict(release(1,'15'),title='Test Part 2 - 15')])
+        self.app.store.set_episode_range(sid,13,24);self.app.refresh_shows()
+        self.assertEqual(self.app.tree.item(release(1)['hash'],'values')[0],'15')
+        self.app.library_tools.preferences();self.root.update()
+        win=self.app.library_tools.windows[('preferences',sid)]
+        win.dual_var.set(True);win.offset_var.set('12');win.update_mapping()
+        self.assertEqual(win.first_var.get(),'1');self.assertEqual(win.last_var.get(),'12')
+        win.first_var.set('3');win.last_var.set('3');button(win,'保存').invoke()
+        self.assertEqual(self.app.store.episode_rule(sid)[:2],(15,15))
+        self.assertEqual(self.app.tree.item(release(1)['hash'],'values')[0],'3 / 总15')
+        self.assertEqual(self.app.first_ep.get(),'3')
+        self.assertEqual(self.app.store.db.execute('select episode from releases').fetchone()[0],'15')
+        self.app.store.set_show_options(sid,dict(self.app.store.show_options(sid),dual=False));self.app.refresh_candidates()
+        self.assertEqual(self.app.tree.item(release(1)['hash'],'values')[0],'15')
+
+    def test_independent_show_hides_dual_control_until_classified(self):
+        self.app.store.save_show('Test',{'英文名':'Test'});self.app.refresh_shows();self.app.library_tools.preferences();self.root.update()
+        win=self.app.library_tools.windows[('preferences',1)]
+        self.assertFalse(win.continuation_var.get());self.assertFalse(win.dual_var.get())
+        win.continuation_var.set(True);win.update_mapping();win.dual_var.set(True);win.offset_var.set('12');win.update_mapping()
+        button(win,'保存').invoke();self.assertTrue(self.app.store.show_options(1)['dual'])
+
+    def test_expanded_candidates_transfer_keeps_dialog_show_context(self):
+        from test_core import release
+        a=self.app.store.save_show('Test',{'英文名':'Test'});b=self.app.store.save_show('Other',{'英文名':'Other'})
+        self.app.store.ingest(a,[release(n,ani=n==1) for n in range(1,6)]);self.app.refresh_shows()
+        self.app.library_tools.candidates();win=self.app.library_tools.windows[('candidates',a)]
+        self.assertEqual(len(self.app.tree.get_children()),1);self.assertEqual(len(win.candidate_tree.get_children()),5)
+        win.candidate_tree.selection_set(release(2)['hash'])
+        self.app.shows.selection_clear(0,'end');self.app.shows.selection_set(1);self.app.refresh_candidates()
+        with patch.object(self.app,'transfer') as transfer:
+            button(win,'转交所选').invoke()
+        self.assertEqual(transfer.call_args.args[0],a);self.assertEqual(transfer.call_args.args[1]['hash'],release(2)['hash'])
+
+    def test_selected_scan_preserves_other_show_diagnostics(self):
+        import json
+        a=self.app.store.save_show('A',{'英文名':'A'});b=self.app.store.save_show('B',{'英文名':'B'})
+        path=self.app.store.root/'last-search.json';path.write_text(json.dumps([{'show_id':b,'name':'B','queries':[],'count':7,'ani':0}]),encoding='utf-8')
+        self.app.refresh_shows()
+        with patch('app.search_show',return_value=([],[])) as search:
+            self.app.scan_selected();self.pump(lambda:'scan' not in self.app.jobs)
+        self.assertEqual(search.call_count,1);self.assertEqual(search.call_args.args[0]['英文名'],'A')
+        data=json.loads(path.read_text(encoding='utf-8'));self.assertEqual(len(data),2)
+        self.assertEqual(next(r for r in data if r['show_id']==b)['count'],7)
+
+    def test_simple_main_surface_keeps_help_and_diagnostics_in_secondary_screens(self):
+        self.assertIsNotNone(button(self.root,'检查所选'));self.assertIsNotNone(button(self.root,'全部候选'))
+        self.assertIsNone(button(self.root,'搜索诊断'));self.assertIsNone(button(self.root,'应用范围'))
+        self.assertFalse(self.app.log.winfo_manager())
+        self.app.library_tools.health();win=self.app.library_tools.windows[('health',None)]
+        self.assertEqual(len(win.health_tree.get_children()),4);self.assertIsNotNone(button(win,'详细诊断'))
+
+    def test_slow_show_does_not_block_results_of_other_show(self):
+        from test_core import release
+        import json
+        a=self.app.store.save_show('Slow',{'英文名':'Slow'})
+        b=self.app.store.save_show('Fast',{'英文名':'Fast'})
+        gate=threading.Event(); self.gates.append(gate)
+        def search(aliases,*args,**kwargs):
+            if aliases['英文名']=='Slow': gate.wait(5)
+            item=dict(release(1 if aliases['英文名']=='Slow' else 2),title=aliases['英文名']+' - 01')
+            kwargs['on_progress']([item])
+            return [item],[]
+        with patch('app.search_show',side_effect=search):
+            self.app.scan()
+            self.pump(lambda:bool(self.app.store.candidates(b)))
+            self.assertIn('scan',self.app.jobs);self.assertEqual(self.app.store.candidates(a),[])
+            gate.set();self.pump(lambda:'scan' not in self.app.jobs)
+        self.assertEqual(len(self.app.store.candidates(a)),1)
+        self.assertEqual(len(json.loads((self.app.store.root/'last-search.json').read_text(encoding='utf-8'))),2)
+
     def setUp(self):
         # Dispose earlier Tcl interpreters on the UI thread before any worker can trigger GC.
         import gc

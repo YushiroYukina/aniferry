@@ -14,9 +14,11 @@ publishing/
 *.db-*
 *.torrent
 bangumi-cache/
+search-cache/
 torrents/
 ai-subtitle-queue.json
 last-search.json
+source-health.json
 smoke-result.json
 .idea/
 .vscode/

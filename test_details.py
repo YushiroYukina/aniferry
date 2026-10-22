@@ -17,6 +17,48 @@ def png():
     output=io.BytesIO(); Image.new('RGB',(300,450),'#8ab7b8').save(output,format='PNG'); return output.getvalue()
 
 class CacheTests(unittest.TestCase):
+    def test_managed_ssl_hook_preserves_required_policy_file(self):
+        import ssl,runpy
+        hook=Path(__file__).parent/'tools/hooks/hook-ssl.py'
+        with tempfile.TemporaryDirectory() as tmp:
+            source=Path(tmp)/'ssl.py';source.write_text("policy='codex-rejected-cas.pem'",encoding='utf-8')
+            policy=source.with_name('codex-rejected-cas.pem');policy.write_text('fixture-policy',encoding='utf-8')
+            with patch.object(ssl,'__file__',str(source)):
+                data=runpy.run_path(str(hook))['datas']
+            self.assertEqual(data,[(str(policy),'.')]);self.assertEqual(policy.read_text(),'fixture-policy')
+
+    def test_managed_ssl_hook_fails_build_if_required_policy_is_missing(self):
+        import ssl,runpy
+        with tempfile.TemporaryDirectory() as tmp:
+            source=Path(tmp)/'ssl.py';source.write_text("policy='codex-rejected-cas.pem'",encoding='utf-8')
+            with patch.object(ssl,'__file__',str(source)):
+                with self.assertRaises(RuntimeError):runpy.run_path(str(Path(__file__).parent/'tools/hooks/hook-ssl.py'))
+
+    def test_standard_ssl_hook_does_not_add_an_unneeded_policy(self):
+        import ssl,runpy
+        with tempfile.TemporaryDirectory() as tmp:
+            source=Path(tmp)/'ssl.py';source.write_text('class SSLContext: pass',encoding='utf-8')
+            with patch.object(ssl,'__file__',str(source)):
+                self.assertEqual(runpy.run_path(str(Path(__file__).parent/'tools/hooks/hook-ssl.py'))['datas'],[])
+
+    def test_default_detail_fetch_retries_transient_network_failure(self):
+        import urllib.error
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch('core.fetch',side_effect=[urllib.error.URLError('temporary EOF'),json.dumps(subject_data()).encode(),png()]) as request,patch('core.time.sleep'):
+                data=DetailCache(tmp).get(42)
+            self.assertEqual(data['score'],8.2);self.assertEqual(request.call_count,3)
+            self.assertTrue(Path(data['cover_path']).is_file())
+
+    def test_tls_check_cli_runs_without_opening_gui_or_using_network(self):
+        import subprocess,sys
+        with tempfile.TemporaryDirectory() as tmp:
+            process=subprocess.run([sys.executable,str(Path(__file__).with_name('app.py')),'--tls-check','--data-dir',tmp],
+                                   capture_output=True,timeout=15)
+            self.assertEqual(process.returncode,0,process.stderr.decode(errors='replace'))
+            data=json.loads((Path(tmp)/'tls-check.json').read_text(encoding='utf-8'))
+            self.assertTrue(data['ok']);self.assertTrue(data['hostname_check']);self.assertEqual(data['verify_mode'],2)
+            self.assertFalse((Path(tmp)/'tracker.sqlite3').exists())
+
     def test_construct_does_not_fetch_or_create_cache(self):
         with tempfile.TemporaryDirectory() as root:
             fetcher=Mock(); cache=DetailCache(root,fetcher)
