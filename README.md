@@ -4,15 +4,15 @@
 
 **把新番更新送到下载器，让追番与整理更顺手。**
 
-**2.0 主版本** · Windows x64
+**2.1 更新** · Windows x64
 
-[下载番舟 2.0.0](https://github.com/YushiroYukina/aniferry/releases/download/v2.0.0/AniFerry-2.0.0-Windows-x64.zip) · [2.0 更新说明](https://github.com/YushiroYukina/aniferry/releases/tag/v2.0.0)
+[下载番舟 2.1.0](https://github.com/YushiroYukina/aniferry/releases/download/v2.1.0/AniFerry-2.1.0-Windows-x64.zip) · [2.1 更新说明](https://github.com/YushiroYukina/aniferry/releases/tag/v2.1.0)
 
-旧版保留在[历史发布](https://github.com/YushiroYukina/aniferry/releases)，用于回退；推荐使用上方2.0下载入口。
+旧版保留在[历史发布](https://github.com/YushiroYukina/aniferry/releases)，用于回退；推荐使用上方2.1下载入口。
 
 [![Windows build](https://github.com/YushiroYukina/aniferry/actions/workflows/windows-build.yml/badge.svg)](https://github.com/YushiroYukina/aniferry/actions/workflows/windows-build.yml)
 
-番舟是一款 Windows 本地追番桌面工具：追踪动画更新、从多个来源整理 BT 候选、查看 Bangumi 资料，并在人工确认后把种子交给下载器。原名“追番信箱”，当前版本 **2.0.0**；GitHub发行情况以Releases页面为准。
+番舟是一款 Windows 本地追番桌面工具：追踪动画更新、从多个来源整理 BT 候选、查看 Bangumi 资料，并在人工确认后把种子交给下载器。原名“追番信箱”，当前版本 **2.1.0**；GitHub发行情况以Releases页面为准。
 
 ## 主要功能
 
@@ -27,6 +27,10 @@
 | 批量整理 | 动画与候选多选、批量删除/忽略，一键清除当前动画的待核对候选并记住清理结果 |
 | 后续字幕工作流 | 标记标题声明中文、无中文、未知；导出已接收资源的字幕处理队列，不内置AI字幕生成 |
 | 简洁界面与二级入口 | 检查所选、推荐资源留在主界面；全部候选、追踪设置、来源状态及使用说明分层进入 |
+| 缺集与手动补搜 | 集数管理查看每集记录，选定旧集单独补搜，不改动日常嗅探下限；支持双集数显示 |
+| 作品订阅源 | 每部最多绑定4个公开RSS，与现有多源搜索并用，仍核对作品、季度及集数 |
+| 纠正与恢复 | 右键标记不是本作、季度不符或集数识别错误；批量忽略、清理记录可从二级窗口恢复 |
+| 任务异常与备份 | 任务窗口显示最近下载器状态；确认任务不存在后才允许恢复待选。支持备份恢复和无凭据列表导入导出 |
 | 六套主题 | 青岚、暮紫、樱雾、暖杏、晴空、深海；圆角卡片、柔和光影，支持紧凑窗口 |
 
 ## 界面预览
@@ -48,7 +52,7 @@
 
 ### 普通用户
 
-通过[2.0 默认下载页](https://github.com/YushiroYukina/aniferry/releases/latest)下载 `AniFerry-2.0.0-Windows-x64.zip`，解压整个目录后双击 `AniFerry-2.0.0.exe`。无需另装Python，须保留同目录 `_internal/`。
+通过[当前版本下载页](https://github.com/YushiroYukina/aniferry/releases/latest)下载 `AniFerry-2.1.0-Windows-x64.zip`，解压整个目录后双击 `AniFerry-2.1.0.exe`。无需另装Python，须保留同目录 `_internal/`。
 
 1. 打开“设置”，选择自己的下载目录，配置下载器并测试连接。为兼容旧版，未设置时默认仍为 `E:\动画\202610\追番`；新用户应按实际盘符修改。
 2. 点击“添加追番”，查找并选用正确的Bangumi作品与季度，可连续添加多部。
@@ -71,15 +75,15 @@ python -m venv .venv
 
 ## 当前验证与限制
 
-- 核心、Tk交互、资料缓存与下载器协议有84项本地回归测试；Windows打包程序通过启动检查。详细范围见[验证说明](docs/VALIDATION.md)。
+- 核心、Tk交互、资料缓存与下载器协议有107项本地回归测试；Windows打包程序通过启动检查。详细范围见[验证说明](docs/VALIDATION.md)。
 - qBittorrent、aria2和Motrix主要通过本地HTTP模拟服务验证协议；BitComet、迅雷的本机任务记录读取曾验证。新接入下载器尚无新任务完整下载验收，不把“启动成功”或“接口模拟通过”当作真实下载成功。
 - 搜索来源有近期结果数量、网络访问和命名差异限制；误匹配过滤不能替代人工核对。
 - 字幕标记根据资源标题判断，没有检查实际媒体字幕轨道。只下载种子内部分文件不会自动认定整集完成。
-- Windows发行包尚未代码签名；此前1.10.0的[GitHub Actions](https://github.com/YushiroYukina/aniferry/actions/runs/39095487280)已通过云端构建；2.0.0的验证情况见验证说明。
+- Windows发行包尚未代码签名；此前1.10.0的[GitHub Actions](https://github.com/YushiroYukina/aniferry/actions/runs/39095487280)已通过云端构建；2.1.0的验证情况见验证说明。
 
 ## 数据与升级
 
-本地数据继续保存在 `%LOCALAPPDATA%\AnimeTracker`，兼容原“追番信箱”的追番、设置和转交记录。升级前关闭旧版；备份时关闭程序后复制整个数据目录。密码和RPC密钥使用当前Windows用户加密保存，换Windows用户后须重新填写。
+本地数据继续保存在 `%LOCALAPPDATA%\AnimeTracker`，兼容原“追番信箱”的追番、设置和转交记录。升级前关闭旧版；首次打开2.1时自动备份数据库。工具菜单的“备份与恢复”支持手动备份与恢复，恢复前再次保存当前数据库。数据库备份包含本机设置和加密凭据，请妥善保管；分享追番列表请使用导出列表。密码和RPC密钥使用当前Windows用户加密保存，换Windows用户后须重新填写。
 
 ## 开发与打包
 

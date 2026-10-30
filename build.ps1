@@ -5,7 +5,7 @@ $version = & $Python -c "from branding import VERSION; print(VERSION)"
 if ($LASTEXITCODE -ne 0) { throw 'Cannot read project version' }
 if (!$Name) { $Name = 'AniFerry-' + $version.Trim() }
 if ($Name -notmatch '^[a-zA-Z0-9._-]+$') { throw 'Name must be a filename without directory components' }
-& $Python -m unittest -v test_core.py test_ui.py test_details.py test_downloaders.py
+& $Python -m unittest -v test_core.py test_ui.py test_details.py test_downloaders.py test_maintenance.py
 if ($LASTEXITCODE -ne 0) { throw 'Tests failed' }
 & $Python tools/build_support.py
 if ($LASTEXITCODE -ne 0) { throw 'Release metadata or license collection failed' }

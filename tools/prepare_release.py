@@ -13,8 +13,8 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from branding import APP_NAME_EN,VERSION
 
-FILES=('app.py','appearance.py','branding.py','core.py','details.py','downloaders.py','tracking.py','library_ui.py',
-       'test_core.py','test_details.py','test_downloaders.py','test_ui.py',
+FILES=('app.py','appearance.py','branding.py','core.py','details.py','downloaders.py','tracking.py','library_ui.py','maintenance.py','maintenance_ui.py',
+       'test_core.py','test_details.py','test_downloaders.py','test_ui.py','test_maintenance.py',
        'README.md','LICENSE','THIRD_PARTY_NOTICES.md','CONTRIBUTING.md','SECURITY.md','CHANGELOG.md',
        'requirements.txt','requirements-build.txt','build.ps1','start.bat','.gitignore','.gitattributes')
 DIRECTORIES=('assets','docs','licenses','.github','tools')

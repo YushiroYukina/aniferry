@@ -18,6 +18,7 @@ from html.parser import HTMLParser
 from contextlib import closing
 from pathlib import Path
 from branding import USER_AGENT
+from maintenance import Maintenance, subscription_url
 
 DEFAULT_OUTPUT = r'E:\动画\202610\追番'
 UA = USER_AGENT
@@ -261,11 +262,13 @@ def discover_bitcomet():
             candidates.extend([str(Path(base) / 'BitComet' / name), str(Path(base) / name)])
     return next((p for p in candidates if Path(p).is_file()), '')
 
-class Store:
+class Store(Maintenance):
     def __init__(self, root):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.root / 'tracker.sqlite3')
+        if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='shows'").fetchone() and not self.db.execute("SELECT 1 FROM sqlite_master WHERE name='repair_targets'").fetchone():
+            self.backup('before-v21')
         if not self.db.execute("SELECT 1 FROM sqlite_master WHERE name='episode_rules'").fetchone() and self.db.execute("SELECT 1 FROM sqlite_master WHERE name='shows'").fetchone():
             from datetime import datetime
             backup=self.root/('tracker-before-v12-'+datetime.now().strftime('%Y%m%d-%H%M%S-%f')+'.sqlite3')
@@ -281,6 +284,8 @@ class Store:
           CREATE TABLE IF NOT EXISTS show_options(show_id INTEGER PRIMARY KEY,options TEXT NOT NULL);
         ''')
         self.db.commit()
+
+        self.init_maintenance()
 
         if not self.db.execute("SELECT 1 FROM sqlite_master WHERE name='handoffs'").fetchone():
             if self.db.execute('SELECT 1 FROM releases LIMIT 1').fetchone(): self.backup('before-v18-downloaders')
@@ -335,6 +340,8 @@ class Store:
                 self.db.execute('DELETE FROM handoffs WHERE show_id=?',(sid,))
                 self.db.execute('DELETE FROM episode_rules WHERE show_id=?',(sid,))
                 self.db.execute('DELETE FROM show_options WHERE show_id=?',(sid,))
+                for table in ('repair_targets','corrections','task_observations'):
+                    self.db.execute('DELETE FROM '+table+' WHERE show_id=?',(sid,))
                 self.db.execute('DELETE FROM shows WHERE id=?',(sid,))
         self.export_queue()
         report_path=self.root/'last-search.json'
@@ -385,10 +392,11 @@ class Store:
         if not row: return
         aliases=self.search_aliases(sid)
         first,last,_ = self.episode_rule(sid)
+        repair=self.repair_episodes(sid)
         for item in items:
             if not matches_show(item,aliases): continue
             ep = episode_number(item['episode'])
-            if ep is not None and (ep < first or (last and ep > last)):
+            if ep is not None and ep not in repair and (ep < first or (last and ep > last)):
                 continue
             self.db.execute("INSERT INTO releases(show_id,hash,title,episode,payload) VALUES(?,?,?,?,?) ON CONFLICT(show_id,hash) DO UPDATE SET payload=excluded.payload,title=excluded.title,episode=excluded.episode,status=CASE WHEN releases.status='误匹配' THEN '待确认' ELSE releases.status END",
                             (sid, item['hash'], item['title'], item['episode'], json.dumps(item, ensure_ascii=False)))
@@ -407,6 +415,10 @@ class Store:
             raise ValueError('编号方式不正确')
         if options.get('dual') and not continuation_eligible(row[0],json.loads(row[1]),options):
             raise ValueError('双集数仅用于续作或分割放送')
+        feeds=options.get('subscriptions',[])
+        if not isinstance(feeds,list) or len(feeds)>4 or any(not isinstance(v,str) for v in feeds):
+            raise ValueError('每部动画最多绑定4个公开订阅源')
+        for feed in feeds:subscription_url(feed)
         if not isinstance(options.get('extra_aliases',[]),list) or len(options.get('extra_aliases',[]))>8:
             raise ValueError('补充名称最多8个')
         for key in ('extra_aliases','exclude_words'):
@@ -423,7 +435,7 @@ class Store:
             aliases[f'补充名称{i}']=value
         return aliases
 
-    def candidates(self, sid, expanded=False):
+    def candidates(self, sid, expanded=False, episodes=None):
         rows = self.db.execute('SELECT payload,status,episode,hash FROM releases WHERE show_id=?', (sid,)).fetchall()
         handled = set()
         for _, status, ep, hash_ in rows:
@@ -436,8 +448,12 @@ class Store:
         aliases=self.search_aliases(sid)
         excluded=self.show_options(sid).get('exclude_words',[])
         items=[x for x in items if matches_show(x,aliases) and not any(w.casefold() in x['title'].casefold() for w in excluded)]
-        items = [x for x in items if episode_number(x['episode']) is None or
-                 first <= int(x['episode']) and (not last or int(x['episode']) <= last)]
+        if episodes is not None:
+            allowed=set(episodes).intersection(self.repair_episodes(sid))
+            items=[x for x in items if episode_number(x['episode']) in allowed]
+        else:
+            items = [x for x in items if episode_number(x['episode']) is None or
+                     first <= int(x['episode']) and (not last or int(x['episode']) <= last)]
         eligible=[x for x in items if x['episode'] not in handled and x['hash'] not in handled]
         return sorted(eligible if expanded else recommend(items, handled),key=lambda x:(episode_number(x['episode']) is None,episode_number(x['episode']) or 0,-x['ani'],-x['seeds']))
 
@@ -459,9 +475,10 @@ class Store:
         self.db.execute("UPDATE releases SET status='已完成' WHERE show_id=? AND hash=?",(sid,hash_))
         ep=episode_number(row[0])
         if ep is not None:
+            self.db.execute('DELETE FROM repair_targets WHERE show_id=? AND episode=?',(sid,ep))
             self.db.execute('INSERT INTO episode_rules(show_id,completed) VALUES(?,?) ON CONFLICT(show_id) DO UPDATE SET completed=MAX(completed,excluded.completed)',(sid,ep))
             # Only pending/ignored sniffed candidates are discarded; keep download history.
-            self.db.execute("UPDATE releases SET status='弃置' WHERE show_id=? AND status IN ('待确认','忽略') AND episode NOT GLOB '*[^0-9]*' AND CAST(episode AS INTEGER) < ?",(sid,max(1,ep-1)))
+            self.db.execute("UPDATE releases SET status='弃置' WHERE show_id=? AND status IN ('待确认','忽略') AND episode NOT GLOB '*[^0-9]*' AND CAST(episode AS INTEGER) < ? AND CAST(episode AS INTEGER) NOT IN (SELECT episode FROM repair_targets WHERE show_id=?)",(sid,max(1,ep-1),sid))
         self.db.commit()
         return True
 
@@ -513,7 +530,9 @@ class Store:
                 profile=decode_profile(raw) if raw else self.downloader_profile(backend)
                 key=(backend,json.dumps(profile,sort_keys=True))
                 groups.setdefault(key,[]).append((sid,hash_,output,remote_id))
-            except ValueError as error: errors.append(LABELS.get(backend,backend)+'：'+str(error))
+            except ValueError as error:
+                self.observe_task(sid,hash_,'连接异常',str(error))
+                errors.append(LABELS.get(backend,backend)+'：'+str(error))
         for (backend,raw),tasks in groups.items():
             try:
                 profile=json.loads(raw)
@@ -526,9 +545,13 @@ class Store:
                     observations=client(backend,profile).snapshot({t[1] for t in tasks},{t[1]:t[3] for t in tasks})
                 for sid,hash_,output,_ in tasks:
                     task=observations.get(hash_)
-                    if not task: continue
+                    if not task:
+                        self.observe_task(sid,hash_,'未发现任务','在对应下载器确认任务是否被移除')
+                        continue
                     if not same_directory(task.get('directory',''),output):
+                        self.observe_task(sid,hash_,'目录不符','请在下载器核对保存位置')
                         errors.append(LABELS[backend]+'：任务目录与设置不符，请在下载器核对保存位置'); continue
+                    self.observe_task(sid,hash_,task.get('state') or ('已完成' if task.get('complete') else '已接收'),task.get('detail',''))
                     changed=self.db.execute("UPDATE releases SET status='已转交' WHERE show_id=? AND hash=? AND status='待接收'",(sid,hash_)).rowcount
                     accepted+=changed
                     if task.get('id'):
@@ -536,6 +559,7 @@ class Store:
                     self.db.commit()
                     if task.get('complete'): completed+=self.mark_completed(sid,hash_)
             except Exception as error:
+                for sid,hash_,_,_ in tasks:self.observe_task(sid,hash_,'连接异常',str(error))
                 errors.append(LABELS.get(backend,backend)+'：'+str(error))
         if accepted or completed: self.export_queue()
         return accepted,completed,sorted(set(errors))
@@ -549,6 +573,8 @@ class Store:
         # An existing handoff belongs to its original downloader, regardless of the current default.
         if self.db.execute("SELECT 1 FROM releases WHERE show_id=? AND episode=? AND status IN ('待接收','已转交','已完成')", (sid, item['episode'])).fetchone():
             raise ValueError('本集已有转交记录')
+        current=self.db.execute('SELECT status FROM releases WHERE show_id=? AND hash=?',(sid,item['hash'])).fetchone()
+        if not current or current[0]!='待确认':raise ValueError('资源已被处理，请刷新候选后重试')
         from downloaders import client,encode_profile
         backend=backend or self.setting('downloader','bitcomet')
         profile=self.downloader_profile(backend)
@@ -561,7 +587,7 @@ class Store:
             raise ValueError('下载目录必须为绝对路径')
         first,last,_=self.episode_rule(sid)
         ep=episode_number(item['episode'])
-        if ep is not None and (ep < first or last and ep > last):
+        if ep is not None and ep not in self.repair_episodes(sid) and (ep < first or last and ep > last):
             raise ValueError('本集已超出追踪范围或被完成进度淘汰')
         if adapter: adapter.test()
         cached=self.root/'torrents'/(item['hash']+'.torrent')
@@ -588,6 +614,7 @@ class Store:
                 if existing.get('complete'): self.mark_completed(sid,item['hash']); state='already_completed'
                 self.export_queue()
             else:
+                self.note_submission(sid,item['hash'])
                 try: remote_id=adapter.add(data,torrent,output)
                 except Exception as error:
                     raise ValueError(str(error)+'；已保留待接收记录，请在转交历史核对后重试') from None
@@ -607,6 +634,7 @@ class Store:
             return {'state':state,'torrent':str(copies/torrent.name),'location':existing.get('SaveLocation',str(output))}
         self.db.execute("UPDATE releases SET status='待接收',output=? WHERE show_id=? AND hash=?", (str(output), sid, item['hash']))
         self.db.commit()
+        self.note_submission(sid,item['hash'])
         subprocess.Popen([exe, str(torrent.resolve()), '--output=' + str(output), '--silent'],cwd=str(Path(exe).parent))
         return {'state':'pending','torrent':str(copies/torrent.name),'location':str(output)}
 
@@ -822,7 +850,7 @@ def search_words(aliases):
     return list(dict.fromkeys(words))
 
 
-def search_show(aliases, cancelled=None, first=1, last=0, diagnostics=None, use_garden=True, use_external=None, on_progress=None, cache_dir=None, request_control=None, exclude_words=()):
+def search_show(aliases, cancelled=None, first=1, last=0, diagnostics=None, use_garden=True, use_external=None, on_progress=None, cache_dir=None, request_control=None, exclude_words=(), subscriptions=(), target_episodes=None):
     merged, errors = {}, []
     reports=diagnostics if diagnostics is not None else []
     effective=dict(aliases); span=None
@@ -884,6 +912,11 @@ def search_show(aliases, cancelled=None, first=1, last=0, diagnostics=None, use_
             except Exception as e:
                 pair=([],{'source':source,'query':'匹配作品ID','returned':0,'kept':0,'ani':0,'error':str(e),'checked_at':time.time()})
                 local.append(pair);batches.put(pair)
+        elif source=='Subscription':
+            for value in subscriptions:
+                if stopped():break
+                url,provider=subscription_url(value)
+                query(url,url,parse_rss if provider=='Nyaa' else lambda r,p=provider:parse_external_rss(r,p))
         else:
             for word in words:
                 if stopped(): break
@@ -901,6 +934,7 @@ def search_show(aliases, cancelled=None, first=1, last=0, diagnostics=None, use_
         return local
 
     sources=['Nyaa']+(['AnimeGarden'] if use_garden else [])+(['Mikan','DMHY'] if use_external else [])
+    if subscriptions:sources.append('Subscription')
     # Different sources run concurrently; a timeout on one cannot hold up the others.
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures=[pool.submit(source_queries,source) for source in sources if not stopped()]
@@ -918,6 +952,8 @@ def search_show(aliases, cancelled=None, first=1, last=0, diagnostics=None, use_
                     item['source_episode']=str(ep); ep+=span[0]-1; item['episode']=str(ep)
                 if ep is not None and (ep<first or last and ep>last or span and not span[0]<=ep<=span[1]):
                     ranged+=1; continue
+                if target_episodes is not None and ep not in target_episodes:
+                    ranged+=1;continue
                 # Unnumbered packs cannot prove that they belong to this cour.
                 if span and ep is None: ranged+=1; continue
                 if span:

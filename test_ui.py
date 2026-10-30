@@ -118,6 +118,50 @@ class UITests(unittest.TestCase):
         self.app=App(self.root,self.tmp.name,prefetch=False); self.app.auto.set(False)
         self.gates=[]
 
+    def test_episode_repair_scan_uses_selected_episode_below_automatic_floor(self):
+        from test_core import release
+        sid=self.app.store.save_show('Test',{'英文名':'Test'})
+        self.app.store.ingest(sid,[release(n,str(n)) for n in range(1,7)])
+        self.app.store.db.execute("UPDATE releases SET status='已转交' WHERE episode='6'");self.app.store.db.commit()
+        self.app.store.mark_completed(sid,release(6)['hash']);self.app.refresh_shows()
+        self.app.library_tools.episodes();win=self.app.library_tools.windows[('episodes',sid)]
+        win.episode_tree.selection_set('3')
+        with patch('app.search_show',return_value=([release(33,'3')],[])) as search:
+            button(win,'补搜所选集数').invoke();self.pump(lambda:'scan' not in self.app.jobs)
+        self.assertEqual(search.call_args.args[2:4],(3,3));self.assertEqual(search.call_args.kwargs['target_episodes'],{3})
+        self.assertTrue(win.repair_tree.exists(release(33)['hash']))
+        self.assertFalse(self.app.tree.exists(release(33)['hash']))
+        with patch.object(self.app,'transfer') as transfer:
+            win.repair_tree.selection_set(release(33)['hash']);button(win,'转交所选').invoke()
+        self.assertEqual(transfer.call_args.args[0],sid)
+
+    def test_feedback_dialog_and_recovery_preserve_show_context(self):
+        from test_core import release
+        sid=self.app.store.save_show('Test',{'英文名':'Test'});self.app.store.ingest(sid,[release(1)]);self.app.refresh_shows()
+        self.app.library_tools.feedback(sid,[release(1)['hash']]);win=self.app.library_tools.windows[('feedback',sid)]
+        win.reason_var.set('不是本作');button(win,'确认').invoke()
+        self.assertFalse(self.app.tree.exists(release(1)['hash']))
+        self.app.library_tools.corrections(sid);win=self.app.library_tools.windows[('corrections',sid)]
+        win.correction_tree.selection_set(release(1)['hash']);button(win,'恢复所选').invoke()
+        self.assertTrue(self.app.tree.exists(release(1)['hash']))
+
+    def test_subscription_settings_save_and_pass_to_scan(self):
+        sid=self.app.store.save_show('Test',{'英文名':'Test'});self.app.refresh_shows();self.app.library_tools.preferences()
+        win=self.app.library_tools.windows[('preferences',sid)];feed='https://mikanani.me/RSS/Bangumi?bangumiId=42'
+        win.subscription_text.insert('1.0',feed);button(win,'保存').invoke()
+        with patch('app.search_show',return_value=([],[])) as search:
+            self.app.scan_selected();self.pump(lambda:'scan' not in self.app.jobs)
+        self.assertEqual(search.call_args.kwargs['subscriptions'],[feed])
+
+    def test_task_and_backup_windows_keep_history_and_backup_entry(self):
+        from test_core import release
+        sid=self.app.store.save_show('Test',{'英文名':'Test'});self.app.store.ingest(sid,[release(1)])
+        self.app.store.db.execute("UPDATE releases SET status='待接收'");self.app.store.db.commit()
+        self.app.history();win=self.app.library_tools.windows[('tasks',None)]
+        self.assertEqual(len(win.task_tree.get_children()),1)
+        self.app.library_tools.backups();win=self.app.library_tools.windows[('backups',None)]
+        button(win,'立即备份').invoke();self.assertEqual(len(win.backup_tree.get_children()),1)
+
     def tearDown(self):
         for gate in self.gates: gate.set()
         self.app.cancelled.set()

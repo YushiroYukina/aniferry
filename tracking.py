@@ -48,7 +48,10 @@ class EpisodeView:
 def source_health(reports, history=()):
     """Describe connectivity independently of whether a query found a release."""
     result=[]; prior={r['source']:r for r in history}
-    for source in ('Nyaa','AnimeGarden','Mikan','DMHY'):
+    sources=['Nyaa','AnimeGarden','Mikan','DMHY']
+    if 'Subscription' in prior or any(q.get('source')=='Subscription' for r in reports for q in r.get('queries',[])):
+        sources.append('Subscription')
+    for source in sources:
         rows=[dict(q,checked_at=q.get('checked_at',r.get('checked_at',0)))
               for r in reports for q in r.get('queries',[]) if q.get('source')==source]
         ok=[r for r in rows if not r.get('error') and not r.get('skipped')]

@@ -131,7 +131,9 @@ class QBittorrent(API):
             files=json.loads(self.request('/api/v2/torrents/files?'+urllib.parse.urlencode({'hash':hash_}))) if candidate else []
             full=bool(files) and all(int(f.get('priority',0))>0 and float(f.get('progress',0))>=1 for f in files)
             complete=full and candidate
-            result[hash_]={'directory':task.get('save_path',''),'complete':complete,'id':hash_}
+            state=task.get('state','')
+            label=('下载异常' if state in ('error','missingFiles') else '已暂停' if state.startswith(('paused','stopped')) else '排队中' if state.startswith('queued') else '检查中' if state.startswith('checking') else '已完成' if complete else '下载中')
+            result[hash_]={'directory':task.get('save_path',''),'complete':complete,'id':hash_,'state':label,'detail':state}
         return result
 
     def add(self,data,torrent,output):
@@ -186,7 +188,9 @@ class Aria2(API):
             total=int(task.get('totalLength',0)); received=int(task.get('completedLength',0))
             full=bool(files) and all(f.get('selected')=='true' and int(f.get('completedLength',0))>=int(f.get('length',0)) for f in files)
             complete=full and total>0 and received>=total and task.get('status') in ('complete','active','paused')
-            result[hash_]={'directory':task.get('dir',''),'complete':complete,'id':task['gid']}
+            state=task.get('status','')
+            label='已完成' if complete else {'paused':'已暂停','waiting':'排队中','error':'下载异常','active':'下载中'}.get(state,'已接收')
+            result[hash_]={'directory':task.get('dir',''),'complete':complete,'id':task['gid'],'state':label,'detail':('错误代码 '+task.get('errorCode','未知')) if state=='error' else state}
         return result
 
 

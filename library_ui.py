@@ -4,12 +4,13 @@ import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 from pathlib import Path
+from maintenance_ui import MaintenanceUI
 from appearance import SoftButton
 from core import continuation_eligible, cached_cour_span, cour_index
 from tracking import EpisodeView, source_health
 
 
-class LibraryTools:
+class LibraryTools(MaintenanceUI):
     def __init__(self,app):
         self.app=app; self.windows={}; self.candidate_refresh={}
 
@@ -98,6 +99,15 @@ class LibraryTools:
         SoftButton(bar,text='忽略所选',command=ignore).pack(side='left',padx=8)
         SoftButton(bar,text='打开资源页面',command=lambda:self.app.open_page(single()) if single() else None).pack(side='left')
         SoftButton(bar,text='追踪设置',command=lambda:self.preferences(sid)).pack(side='right')
+        menu=tk.Menu(tree,tearoff=False)
+        menu.add_command(label='标记误匹配原因',command=lambda:self.feedback(sid,tree.selection()))
+        menu.add_command(label='查看处理记录',command=lambda:self.corrections(sid))
+        def context(event):
+            target=tree.identify_row(event.y)
+            if target and target not in tree.selection():tree.selection_set(target)
+            try:menu.tk_popup(event.x_root,event.y_root)
+            finally:menu.grab_release()
+        tree.bind('<Button-3>',context)
         win.candidate_tree=tree;win.candidate_details=details;refresh()
 
     def preferences(self,sid=None):
@@ -111,6 +121,11 @@ class LibraryTools:
         book=ttk.Notebook(win);book.pack(fill='both',expand=True,padx=18,pady=(18,8))
         episodes=ttk.Frame(book,padding=22);search=ttk.Frame(book,padding=22)
         book.add(episodes,text='集数与显示');book.add(search,text='搜索偏好')
+        feeds=ttk.Frame(book,padding=22);book.add(feeds,text='作品订阅源')
+        ttk.Label(feeds,text='绑定该作品的公开 RSS 地址（一行一个，最多4个）').pack(anchor='w')
+        subscriptions=tk.Text(feeds,height=7,wrap='word',font=('Microsoft YaHei UI',10));subscriptions.pack(fill='x',pady=12)
+        subscriptions.insert('1.0','\n'.join(stored.get('subscriptions',[])))
+        ttk.Label(feeds,text='支持 Nyaa、蜜柑作品/搜索、動漫花園公开 RSS。绑定后与多名称搜索一起检查，仍核对片名、季度和集数。',style='Muted.TLabel',wraplength=650).pack(anchor='w')
         continuation=tk.BooleanVar(value=continuation_eligible(name,aliases,stored))
         dual=tk.BooleanVar(value=bool(stored.get('dual')))
         offset=tk.StringVar(value=str(stored.get('offset',0)))
@@ -188,7 +203,7 @@ class LibraryTools:
         bar=ttk.Frame(win,padding=(18,10));bar.pack(fill='x')
         def save():
             try:
-                opts=options();opts.update(extra_aliases=lines(extra),exclude_words=lines(excludes))
+                opts=options();opts.update(extra_aliases=lines(extra),exclude_words=lines(excludes),subscriptions=lines(subscriptions))
                 view=EpisodeView.from_options(opts,continuation.get())
                 first=view.storage(int(first_var.get()));last=view.storage(int(last_var.get())) if last_var.get().strip() else 0
                 if not 1<=first<=999 or not 0<=last<=999 or last and last<first:raise ValueError('集数范围无效，请核对起止集及编号方式')
@@ -199,6 +214,7 @@ class LibraryTools:
         SoftButton(bar,text='说明',command=lambda:self.help('编号与筛选')).pack(side='left')
         win.dual_var=dual;win.continuation_var=continuation;win.offset_var=offset;win.numbering_var=numbering;win.range_basis_var=basis
         win.first_var=first_var;win.last_var=last_var;win.extra_text=extra;win.exclude_text=excludes;win.update_mapping=update
+        win.subscription_text=subscriptions
         update(False)
 
     def health(self,sid=None):

@@ -126,9 +126,22 @@ class App:
         batch=ttk.Frame(self.resource_section,style='Card.TFrame'); batch.pack(fill='x',pady=(0,6))
         ttk.Label(batch,textvariable=self.progress_label,style='CardMuted.TLabel').pack(side='left')
         SoftButton(batch,text='追踪设置',command=self.library_tools.preferences).pack(side='right')
+        SoftButton(batch,text='集数管理',command=self.library_tools.episodes).pack(side='right',padx=6)
         self.tree = ttk.Treeview(table, columns=columns, show='headings', selectmode='extended')
         self.tree.bind('<Control-a>',lambda _:self.select_all_candidates())
         self.tree.bind('<Double-1>',lambda _:self.library_tools.candidates())
+        candidate_menu=tk.Menu(self.tree,tearoff=False)
+        def correct_selected():
+            row=self.selected_show()
+            if row:self.library_tools.feedback(row[0],self.tree.selection())
+        candidate_menu.add_command(label='标记误匹配原因',command=correct_selected)
+        candidate_menu.add_command(label='忽略与纠正记录',command=self.library_tools.corrections)
+        def candidate_context(event):
+            target=self.tree.identify_row(event.y)
+            if target and target not in self.tree.selection():self.tree.selection_set(target)
+            try:candidate_menu.tk_popup(event.x_root,event.y_root)
+            finally:candidate_menu.grab_release()
+        self.tree.bind('<Button-3>',candidate_context)
         for col, title, width in zip(columns, ['集数', '来源', '中文字幕', '做种', '大小', '资源标题'], [55,82,112,55,75,400]):
             anchor='w' if col=='title' else 'center'
             self.tree.heading(col, text=title,anchor=anchor); self.tree.column(col, width=width, stretch=col=='title',anchor=anchor)
@@ -161,7 +174,8 @@ class App:
         menu=getattr(self,'tools_menu',None)
         if menu is None:
             menu=tk.Menu(self.root,tearoff=False);self.tools_menu=menu
-            for label,command in [('检查全部',self.scan),('来源状态',self.library_tools.health),('转交历史',self.history),
+            for label,command in [('检查全部',self.scan),('来源状态',self.library_tools.health),('任务与转交记录',self.history),
+                                  ('忽略与纠正记录',self.library_tools.corrections),('备份与恢复',self.library_tools.backups),
                                   ('清除当前待核对',self.clear_unknown),('待字幕清单',self.export),('下载目录',self.open_output),('使用说明',self.library_tools.help)]:
                 menu.add_command(label=label,command=command)
         menu.configure(background=self.palette['card'],foreground=self.palette['ink'],activebackground=self.palette['soft'],activeforeground=self.palette['ink'])
@@ -469,12 +483,15 @@ class App:
         if not ids:self.note('请先选择动画');return
         self.scan(ids)
 
-    def scan(self,ids=None):
+    def scan(self,ids=None,repair=None):
         if 'scan' in self.jobs:self.note('正在检查更新');return
         self.next_scan = time.monotonic() + int(self.store.setting('interval', '30')) * 60
         rows = self.store.shows()
         if ids is not None:rows=[r for r in rows if r[0] in ids]
         rules={sid:self.store.episode_rule(sid) for sid,_,_ in rows}
+        if repair:
+            for sid,episodes in repair.items():
+                if sid in rules:rules[sid]=(min(episodes),max(episodes),rules[sid][2])
         search_aliases={sid:self.store.search_aliases(sid) for sid,_,_ in rows}
         preferences={sid:self.store.show_options(sid) for sid,_,_ in rows}
         if not rows: return
@@ -496,7 +513,9 @@ class App:
                     self.messages.put(('scan-progress',progress,result,None,None))
                 items,errors=search_show(search_aliases[sid], self.cancelled,first,last,diagnostics=reports,
                                          on_progress=partial,cache_dir=self.store.root/'search-cache',request_control=self.search_limiter,
-                                         exclude_words=preferences[sid].get('exclude_words',[]))
+                                         exclude_words=preferences[sid].get('exclude_words',[]),
+                                         subscriptions=preferences[sid].get('subscriptions',[]),
+                                         target_episodes=repair.get(sid) if repair else None)
                 result=(sid,name,items,errors,reports)
                 self.messages.put(('scan-progress',progress,result,None,None))
                 return result
@@ -786,7 +805,7 @@ class App:
         if not row or not selected: return
         if 'transfer' in self.jobs: self.note('正在转交任务，请稍后再忽略候选'); return
         count=self.store.ignore_releases(row[0],selected)
-        self.refresh_candidates(); self.note(f'已忽略 {count} 个候选资源')
+        self.refresh_candidates();self.note(f'已忽略 {count} 个候选，可在工具中的忽略与纠正记录恢复')
 
     def clear_unknown(self):
         row=self.selected_show()
@@ -801,33 +820,7 @@ class App:
         if item and any(item['page'].startswith(prefix) for prefix in ['https://nyaa.si/view/','https://animes.garden/detail/','https://mikanani.me/Home/Episode/','https://share.dmhy.org/topics/view/']): webbrowser.open(item['page'])
 
     def history(self):
-        win=tk.Toplevel(self.root); win.title('转交历史与重置'); win.geometry('950x420')
-        box=tk.Listbox(win,width=100); box.pack(fill='both',expand=True,padx=10,pady=10)
-        rows=self.store.db.execute("SELECT show_id,hash,shows.name,title,output,status FROM releases JOIN shows ON shows.id=show_id WHERE status IN ('待接收','已转交','已完成') ORDER BY show_id").fetchall()
-        for row in rows: box.insert('end',f'{row[5]} | {LABELS[self.store.handoff_backend(*row[:2])]} | {row[2]} | {row[3]} | {row[4]}')
-        def reset():
-            if not box.curselection() or self.busy: return
-            row=rows[box.curselection()[0]]
-            if row[5]=='已完成':
-                self.note('已完成记录保留作为追踪进度，不可重置为未接收'); return
-            if not messagebox.askyesno('重置记录','仅当下载器未接收此任务时重置。重置后可以再次转交，可能重复下载。',parent=win): return
-            self.store.db.execute("UPDATE releases SET status='待确认',output='' WHERE show_id=? AND hash=?",row[:2]); self.store.db.commit()
-            self.store.db.execute('DELETE FROM handoffs WHERE show_id=? AND hash=?',row[:2]); self.store.db.commit()
-            self.store.export_queue(); self.refresh_candidates(); win.destroy()
-        SoftButton(win,text='重置选中的转交记录',command=reset).pack(pady=8)
-        def manual_complete():
-            if not box.curselection(): return
-            row=rows[box.curselection()[0]]
-            if row[5]=='待接收':
-                self.note('任务尚未确认接收，请先在对应下载器核对；未接收可重置后重试'); return
-            self.store.mark_completed(row[0],row[1]); self.store.export_queue(); self.refresh_candidates(); win.destroy()
-            self.note('已手动确认下载完成，旧集候选已弃置')
-        SoftButton(win,text='手动确认选中任务下载完成',command=manual_complete).pack(pady=8)
-        def open_seeds():
-            folder=self.store.root/'torrents'
-            if folder.exists(): os.startfile(str(folder))
-        SoftButton(win,text='打开已下载的种子目录',command=open_seeds).pack(pady=8)
-
+        return self.library_tools.tasks()
     def export(self):
         path=self.store.export_queue(); os.startfile(str(path))
 
